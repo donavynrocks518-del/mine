@@ -61,6 +61,27 @@ To turn it on, open Settings → AI Analyst, tick the box and paste an Anthropic
 - Click any **token** to see its full check sheet, score breakdown and links to its chart and RugCheck report.
 - **Close** on an open position sells it at the current price.
 
+## Kalshi weather desk
+
+A second, completely separate desk on the **Kalshi weather** tab of the dashboard. It has its own paper account, settings, log and data folder (`data/kalshi`); pausing or resetting one desk never touches the other.
+
+It trades Kalshi's daily high temperature contracts for ten US cities (New York, Los Angeles, Chicago, Denver, Austin, Miami, Dallas, Oklahoma City, Atlanta, Philadelphia). Each city's day is split into ranges such as "49° to 50°"; a contract pays $1 if the official high lands in its range.
+
+| Agent | What it does |
+|---|---|
+| **Scout** | Pulls every open contract for those cities from Kalshi every 3 minutes. |
+| **Filter** | Skips contracts with little trading, a wide bid/ask gap, a price near 0¢ or $1, or less than 30 minutes before close. |
+| **Analyst** | Turns the National Weather Service forecast (and, for today, the high already recorded) into a probability for each range, blends it 50/50 with the market's price, and works out the edge on YES and NO after Kalshi's fee. |
+| **Executor** | Buys only when the edge is at least 6¢ per contract, walking the real Kalshi order book so the fill price is realistic. At most 4% of the account per contract and 10% per city per day. |
+| **Risk** | Marks every contract at the price it could be sold for right now, sells early if the market pays well above fair value, and pays out contracts when Kalshi settles them. |
+| **Logger** | Records every decision, and scores the forecast model, the market and the blend against every settled result. |
+
+**The number to watch is the "Forecast vs market" card.** It shows an accuracy score (lower is better) for the model, the market and the blend on every contract that has settled. If the market keeps scoring better than the blend, the desk's trades will lose money over time, however a single day goes. You need a couple of weeks of results before it means much.
+
+Contracts settle the morning after their day, so trades only turn into wins or losses then. Until settlement the account shows what the contracts could be sold for, which starts below what was paid because of the bid/ask gap and fees.
+
+Nothing here places a real order or needs a Kalshi account. Real trading would need a Kalshi account (18+, US resident, ID check) and its API keys.
+
 ## How honest are the numbers?
 
 Fills are modelled, not real. Buys and sells pay a swap fee, a slippage allowance and the price impact of the trade against the pool's liquidity. A stop is a trigger, not a guaranteed price: if a token drops 30% between two price checks, the loss is 30%, not 6%.
