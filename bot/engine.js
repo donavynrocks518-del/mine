@@ -14,6 +14,10 @@ const DEFAULT_CONFIG = {
   stopPct: 6, // hard stop
   trailArmPct: 12, // trailing stop switches on at this gain
   trailDistPct: 8, // trailing stop sells this far below the peak
+  beArmPct: 8, // stop moves up to the entry price at this gain (0 = off)
+  tpPct: 25, // take profit: sell part of the position at this gain (0 = off)
+  tpSellPct: 50, // how much of the position the take profit sells
+  staleMin: 45, // close a position that has gone nowhere after this long (0 = off)
   maxHoldHours: 6, // 0 = no time limit
   minVolH1: 50000, // filter: volume in the last hour
   minLiq: 15000, // filter: pool liquidity
@@ -24,12 +28,14 @@ const DEFAULT_CONFIG = {
   slipPct: 0.5, // extra slippage allowance on each side
   maxPoolPct: 2, // never be more than this share of a pool
   cooldownMin: 120, // don't re-buy the same token within this time
+  rpcUrl: '', // optional private Solana node; blank uses the free public one
 };
 
 const LIMITS = {
   startBalance: [10, 1e7], maxSizePct: [0.5, 100], maxOpen: [1, 50], stopPct: [0.5, 90],
   trailArmPct: [1, 1000], trailDistPct: [0.5, 90], maxHoldHours: [0, 720], minVolH1: [0, 1e9],
   minLiq: [0, 1e9], maxTop10Pct: [1, 100], minLpLockedPct: [0, 100], minScore: [0, 1],
+  beArmPct: [0, 1000], tpPct: [0, 10000], tpSellPct: [5, 95], staleMin: [0, 100000],
   feePct: [0, 10], slipPct: [0, 20], maxPoolPct: [0.1, 100], cooldownMin: [0, 10080],
 };
 
@@ -44,6 +50,9 @@ const REASONS = {
   unverified: 'Safety report unavailable',
   score: 'Analyst score below pass mark',
 };
+
+// Pool types whose price is simply one vault balance divided by the other.
+const CHAIN_POOLS = new Set(['pump_fun_amm', 'raydium', 'raydium_cpmm']);
 
 const clamp01 = (x) => Math.max(0, Math.min(1, x));
 const ramp = (x, lo, hi) => clamp01((x - lo) / (hi - lo));
@@ -66,6 +75,7 @@ class Desk extends EventEmitter {
     this.rugQueue = [];
     this.rugBusy = false;
     this.riskBusy = false;
+    this.chainBusy = false;
     this.scoutTick = 0;
     this.dirty = false;
   }
@@ -89,13 +99,14 @@ class Desk extends EventEmitter {
     this.secondLook = []; // { mint, due }
     this.lastBuy = new Map(); // mint -> ts
     this.posSeq = 0;
+    this.solUsd = 0; // latest SOL price, learned from the pairs the Scout sees
   }
 
   load() {
     try {
       const s = JSON.parse(fs.readFileSync(this.stateFile, 'utf8'));
       this.config = this.cleanConfig({ ...DEFAULT_CONFIG, ...s.config });
-      for (const k of ['running', 'startedAt', 'cash', 'startBalance', 'positions', 'trades', 'curve', 'agents', 'logs', 'noise', 'logSeq', 'posSeq']) {
+      for (const k of ['running', 'startedAt', 'cash', 'startBalance', 'positions', 'trades', 'curve', 'agents', 'logs', 'noise', 'logSeq', 'posSeq', 'solUsd']) {
         if (s[k] !== undefined) this[k] = s[k];
       }
       Object.assign(this.counters, s.counters);
@@ -103,6 +114,11 @@ class Desk extends EventEmitter {
       this.seen = new Map(s.seen || []);
       this.evals = new Map(s.evals || []);
       this.lastBuy = new Map(s.lastBuy || []);
+      for (const p of this.positions) { // positions saved by an older version
+        p.basis = p.basis || p.size / p.tokens;
+        p.realized = p.realized || 0;
+        p.stopMove = p.stopMove ?? -this.config.stopPct;
+      }
     } catch { /* first run */ }
   }
 
@@ -113,7 +129,7 @@ class Desk extends EventEmitter {
       config: this.config, running: this.running, startedAt: this.startedAt, cash: this.cash,
       startBalance: this.startBalance, positions: this.positions, trades: this.trades, curve: this.curve,
       counters: this.counters, why: this.why, agents: this.agents, logs: this.logs.slice(-1500),
-      noise: this.noise.slice(-500), logSeq: this.logSeq, posSeq: this.posSeq,
+      noise: this.noise.slice(-500), logSeq: this.logSeq, posSeq: this.posSeq, solUsd: this.solUsd,
       seen: [...this.seen].slice(-15000), evals: [...this.evals].slice(-600), lastBuy: [...this.lastBuy],
     };
     try {
@@ -129,6 +145,10 @@ class Desk extends EventEmitter {
       if (Number.isFinite(v)) out[k] = Math.max(lo, Math.min(hi, v));
     }
     out.maxOpen = Math.round(out.maxOpen);
+    if (typeof c.rpcUrl === 'string') {
+      const u = c.rpcUrl.trim();
+      out.rpcUrl = /^https:\/\/[^\s]{4,300}$/.test(u) ? u : '';
+    }
     return out;
   }
 
@@ -154,12 +174,13 @@ class Desk extends EventEmitter {
     every(20000, () => this.scout());
     every(60000, () => this.scoutProfiles());
     every(60000, () => this.secondLooks());
-    every(4000, () => this.risk());
+    every(1000, () => this.riskChain());
+    every(3000, () => this.riskFeed());
     every(1300, () => this.pumpRugQueue());
     this.timers.push(setInterval(() => this.sample(), 15000));
     this.timers.push(setInterval(() => this.save(), 8000));
     this.scout().catch((e) => this.softError(e));
-    this.risk().catch((e) => this.softError(e));
+    this.riskFeed().catch((e) => this.softError(e));
   }
 
   stop() {
@@ -209,6 +230,7 @@ class Desk extends EventEmitter {
   }
 
   consider(cand, source) {
+    if (cand.quote === feeds.SOL && cand.quoteUsd > 1) this.solUsd = cand.quoteUsd;
     if (this.seen.has(cand.mint) || !cand.priceUsd) return;
     this.seen.set(cand.mint, Date.now());
     if (this.seen.size > 20000) {
@@ -289,6 +311,9 @@ class Desk extends EventEmitter {
       ev.checks.push({ key: 'unverified', label: 'Safety report available', pass: false, value: 'no answer' });
       return this.kill(ev, 'filter', 'unverified', 'safety report unavailable · not buying blind');
     }
+    // Remember the pool this pair trades in, so Risk can read its balances from the chain.
+    ev.chain = (rug.pools || []).find((m) => m.pubkey === c.pool && CHAIN_POOLS.has(m.type)) || null;
+    delete rug.pools;
     ev.rug = rug;
     if (rug.name && (!c.name || c.name === c.sym)) c.name = rug.name;
     const curve = rug.marketType === 'pump_fun'; // still on the bonding curve: there is no LP to pull
@@ -349,6 +374,20 @@ class Desk extends EventEmitter {
     this.log('executor', 'info', `skipped · ${why}`, ev.cand);
   }
 
+  // Price and liquidity of one pool from its two vault balances.
+  quoteFromVaults(chain, mint, balances) {
+    const a = balances.get(chain.vaults[0]); const b = balances.get(chain.vaults[1]);
+    if (a === undefined || b === undefined) return null; // no answer
+    if (!a || !b) return { gone: true };
+    const base = a.mint === mint ? a : b.mint === mint ? b : null;
+    const quote = base === a ? b : a;
+    if (!base || !feeds.QUOTES.has(quote.mint)) return null;
+    const quoteUsd = quote.mint === feeds.SOL ? this.solUsd : 1;
+    if (!quoteUsd) return null;
+    if (base.amount <= 0 || quote.amount <= 0) return { gone: true };
+    return { priceUsd: (quote.amount / base.amount) * quoteUsd, liqUsd: 2 * quote.amount * quoteUsd };
+  }
+
   async execute(ev) {
     const cfg = this.config; let c = ev.cand;
     if (!this.running) return this.skip(ev, 'desk is paused');
@@ -357,10 +396,23 @@ class Desk extends EventEmitter {
     if (last && Date.now() - last < cfg.cooldownMin * 60000) return this.skip(ev, 'traded it recently');
     if (this.positions.length >= cfg.maxOpen) return this.skip(ev, `already holding ${cfg.maxOpen} positions`);
     // The safety checks took a moment: buy at the price now, not the price then.
+    let chain = ev.chain; let source = 'feed';
     try {
       const live = (await feeds.dexTokens([c.mint])).get(c.mint);
-      if (live && live.priceUsd) { c = { ...c, priceUsd: live.priceUsd, liqUsd: live.liqUsd || c.liqUsd, img: live.img || c.img }; ev.cand = c; }
+      if (live && live.priceUsd) {
+        if (live.quote === feeds.SOL && live.quoteUsd > 1) this.solUsd = live.quoteUsd;
+        c = { ...c, priceUsd: live.priceUsd, liqUsd: live.liqUsd || c.liqUsd, img: live.img || c.img }; ev.cand = c;
+      }
     } catch { /* fall back to the scouted price */ }
+    if (chain) {
+      try {
+        const q = this.quoteFromVaults(chain, c.mint, await feeds.chainBalances(cfg.rpcUrl, chain.vaults));
+        // Trust the chain only if it roughly agrees with the feed: guards against reading the wrong pool.
+        if (q && q.priceUsd && Math.abs(q.priceUsd / c.priceUsd - 1) < 0.25) {
+          c = { ...c, priceUsd: q.priceUsd, liqUsd: q.liqUsd }; ev.cand = c; source = 'chain';
+        } else chain = null;
+      } catch { /* chain read failed: buy on the feed price, Risk will keep trying the chain */ }
+    }
     if (this.positions.length >= cfg.maxOpen || this.positions.some((p) => p.mint === c.mint)) return this.skip(ev, 'slot taken while checking the price');
     const size = Math.min(this.equity() * cfg.maxSizePct / 100, c.liqUsd * cfg.maxPoolPct / 100, this.cash);
     if (size < 1) return this.skip(ev, 'not enough free cash');
@@ -369,10 +421,12 @@ class Desk extends EventEmitter {
     const tokens = (size * (1 - cfg.feePct / 100)) / fill;
     const pos = {
       id: ++this.posSeq, mint: c.mint, sym: c.sym, name: c.name, pool: c.pool, dex: c.dex, img: c.img,
-      openedAt: Date.now(), size, tokens, entryPrice: fill, price: c.priceUsd, liq: c.liqUsd, entryLiq: c.liqUsd,
-      peak: c.priceUsd, trailing: false, value: tokens * c.priceUsd, score: ev.score, missingSince: 0,
+      openedAt: Date.now(), size, tokens, entryPrice: fill, basis: size / tokens, price: c.priceUsd, liq: c.liqUsd,
+      peak: c.priceUsd, trailing: false, tookProfit: false, realized: 0, stopMove: -cfg.stopPct,
+      value: tokens * c.priceUsd, score: ev.score, missingSince: 0, chain: chain ? { vaults: chain.vaults } : null,
+      chainOkAt: source === 'chain' ? Date.now() : 0, source,
     };
-    pos.pnlUsd = pos.value - size; pos.pnlPct = (pos.value / size - 1) * 100;
+    pos.pnlUsd = pos.value - size; pos.pnlPct = (pos.pnlUsd / size) * 100;
     this.cash -= size;
     this.positions.push(pos);
     this.lastBuy.set(c.mint, Date.now());
@@ -380,61 +434,120 @@ class Desk extends EventEmitter {
     ev.outcome = 'bought';
     const share = (size / this.equity()) * 100;
     this.log('executor', 'buy', `bought ${money(size)} · ${share.toFixed(0)}% of stack`, c, { usd: size });
-    this.log('risk', 'info', `stop set · −${cfg.stopPct}% hard`, c);
+    this.log('risk', 'info', `stop set · −${cfg.stopPct}% hard · watching ${chain ? 'on-chain' : 'price feed'}`, c);
   }
 
   // ---------- Risk ----------
-  async risk() {
+  // Fast lane: once a second, read every watched pool's balances straight from the chain.
+  async riskChain() {
+    const watched = this.positions.filter((p) => p.chain);
+    if (this.chainBusy || !watched.length) return;
+    this.chainBusy = true;
+    try {
+      const balances = await feeds.chainBalances(this.config.rpcUrl, watched.flatMap((p) => p.chain.vaults));
+      const now = Date.now();
+      for (const p of watched) {
+        if (!this.positions.includes(p)) continue;
+        const q = this.quoteFromVaults(p.chain, p.mint, balances);
+        if (!q) continue;
+        if (q.gone) {
+          p.missingSince = p.missingSince || now;
+          if (now - p.missingSince > 20000) this.close(p, 'liquidity gone', 0);
+          continue;
+        }
+        p.chainOkAt = now; p.source = 'chain';
+        this.manage(p, q.priceUsd, q.liqUsd, now);
+      }
+      this.dirty = true;
+    } finally { this.chainBusy = false; }
+  }
+
+  // Slow lane: the price feed, for pools the chain reader can't price and as a backup when the node is down.
+  async riskFeed() {
+    const now = Date.now();
     if (this.riskBusy || !this.positions.length) return;
     this.riskBusy = true;
     try {
-      const cfg = this.config;
       const live = await feeds.dexTokens(this.positions.map((p) => p.mint));
-      const now = Date.now();
       for (const p of [...this.positions]) {
         const q = live.get(p.mint);
+        if (q && q.quote === feeds.SOL && q.quoteUsd > 1) this.solUsd = q.quoteUsd;
+        if (q && q.img && !p.img) p.img = q.img;
+        if (p.chain && now - p.chainOkAt < 8000) continue; // the chain reader has this one
         if (!q || !q.priceUsd) {
           // The feed answered but this token is gone from it: its pool has most likely been drained.
           p.missingSince = p.missingSince || now;
           if (now - p.missingSince > 5 * 60000) this.close(p, 'liquidity gone', 0);
           continue;
         }
-        p.missingSince = 0;
-        p.price = q.priceUsd; p.liq = q.liqUsd;
-        p.value = p.tokens * p.price;
-        p.pnlUsd = p.value - p.size; p.pnlPct = (p.value / p.size - 1) * 100;
-        if (p.price > p.peak) p.peak = p.price;
-        if (!p.trailing && p.pnlPct >= cfg.trailArmPct) {
-          p.trailing = true;
-          this.log('risk', 'info', `trail active · after ${pct(p.pnlPct)}`, p);
-        }
-        if (p.pnlPct <= -cfg.stopPct) this.close(p, 'stop hit');
-        else if (p.trailing && p.price <= p.peak * (1 - cfg.trailDistPct / 100)) this.close(p, 'trail → sold');
-        else if (cfg.maxHoldHours > 0 && now - p.openedAt > cfg.maxHoldHours * 3600000) this.close(p, 'time limit');
+        p.source = 'feed';
+        this.manage(p, q.priceUsd, q.liqUsd, now);
       }
       this.dirty = true;
     } finally { this.riskBusy = false; }
   }
 
-  // Sell at the price the market shows now, less fee, slippage and our own price impact.
+  // The exit rules, applied to one position at one price.
+  manage(p, priceUsd, liqUsd, now) {
+    const cfg = this.config;
+    p.missingSince = 0;
+    if (p.stopMove < 0) p.stopMove = -cfg.stopPct; // follow a changed setting until the stop has moved up
+    p.price = priceUsd; p.liq = liqUsd;
+    p.value = p.tokens * p.price;
+    p.pnlUsd = p.realized + p.value - p.size; p.pnlPct = (p.pnlUsd / p.size) * 100;
+    if (p.price > p.peak) p.peak = p.price;
+    const move = (p.price / p.basis - 1) * 100; // price move since entry, entry costs included
+    p.move = move;
+    if (cfg.beArmPct > 0 && p.stopMove < 0 && move >= cfg.beArmPct) {
+      p.stopMove = 0;
+      this.log('risk', 'info', `stop moved to entry · after ${pct(move)}`, p);
+    }
+    if (!p.trailing && move >= cfg.trailArmPct) {
+      p.trailing = true;
+      this.log('risk', 'info', `trail active · after ${pct(move)}`, p);
+    }
+    if (cfg.tpPct > 0 && !p.tookProfit && move >= cfg.tpPct) this.takeProfit(p, move);
+    const held = now - p.openedAt;
+    if (move <= p.stopMove) this.close(p, p.stopMove < 0 ? 'stop hit' : 'stopped at entry');
+    else if (p.trailing && p.price <= p.peak * (1 - cfg.trailDistPct / 100)) this.close(p, 'trail → sold');
+    else if (cfg.staleMin > 0 && !p.trailing && !p.tookProfit && held > cfg.staleMin * 60000) this.close(p, 'going nowhere');
+    else if (cfg.maxHoldHours > 0 && held > cfg.maxHoldHours * 3600000) this.close(p, 'time limit');
+  }
+
+  // What selling `tokens` would bring in right now, after fee, slippage and our own price impact.
+  proceedsFor(p, tokens) {
+    const cfg = this.config;
+    const gross = tokens * p.price;
+    const impact = Math.min(0.95, p.liq > 0 ? gross / (p.liq / 2) : 0.95);
+    return gross * Math.max(0, 1 - impact - cfg.slipPct / 100) * (1 - cfg.feePct / 100);
+  }
+
+  // Bank part of a winner; the rest keeps running behind the trailing stop.
+  takeProfit(p, move) {
+    const part = this.config.tpSellPct / 100;
+    const sold = p.tokens * part;
+    const got = this.proceedsFor(p, sold);
+    p.tokens -= sold; p.realized += got; p.tookProfit = true;
+    p.value = p.tokens * p.price;
+    p.pnlUsd = p.realized + p.value - p.size; p.pnlPct = (p.pnlUsd / p.size) * 100;
+    this.cash += got;
+    this.log('risk', 'win', `took profit · sold ${this.config.tpSellPct}% at ${pct(move)} · banked ${money(got)}`, p, { usd: got });
+    this.sample();
+  }
+
+  // Sell everything left at the price the market shows now.
   // A stop is a trigger, not a guaranteed price: if the token gapped down, the loss is bigger than the stop.
   close(p, reason, forcedValue) {
-    const cfg = this.config;
-    let proceeds;
-    if (forcedValue !== undefined) proceeds = forcedValue;
-    else {
-      const gross = p.tokens * p.price;
-      const impact = Math.min(0.95, p.liq > 0 ? gross / (p.liq / 2) : 0.95);
-      proceeds = gross * Math.max(0, 1 - impact - cfg.slipPct / 100) * (1 - cfg.feePct / 100);
-    }
+    const proceeds = p.realized + (forcedValue !== undefined ? forcedValue : this.proceedsFor(p, p.tokens));
     const pnlUsd = proceeds - p.size;
     const pnlPct = (proceeds / p.size - 1) * 100;
     this.positions = this.positions.filter((x) => x !== p);
-    this.cash += proceeds;
+    this.cash += proceeds - p.realized;
     if (pnlUsd >= 0) this.counters.wins++; else this.counters.losses++;
     this.trades.push({
       id: p.id, mint: p.mint, sym: p.sym, name: p.name, img: p.img, openedAt: p.openedAt, closedAt: Date.now(),
       size: p.size, proceeds, pnlUsd, pnlPct, reason, entryPrice: p.entryPrice, exitPrice: p.price, score: p.score,
+      tookProfit: p.tookProfit, source: p.source,
     });
     if (this.trades.length > 2000) this.trades.splice(0, 200);
     this.log('risk', pnlUsd >= 0 ? 'win' : 'loss', `${reason} · ${pct(pnlPct)} · ${signed(pnlUsd)}`, p, { usd: pnlUsd });

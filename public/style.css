@@ -149,6 +149,9 @@ tbody tr:hover { background: var(--panel-2); }
 .up { color: var(--green); } .down { color: var(--red); }
 .tag { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
 .tag.trail { color: var(--violet); border-color: color-mix(in srgb, var(--violet) 40%, transparent); }
+.tag.took { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, transparent); }
+.tag.fast { color: var(--teal); border-color: color-mix(in srgb, var(--teal) 40%, transparent); }
+.field.wide { grid-column: 1 / -1; }
 .empty { color: var(--muted); padding: 26px 8px; text-align: center; font-size: 13px; }
 
 /* ---------- why they died ---------- */

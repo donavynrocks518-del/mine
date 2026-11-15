@@ -15,14 +15,18 @@ const health = {
   gecko: { name: 'GeckoTerminal', role: 'new pairs', ok: null, error: null, lastOk: 0, calls: 0, errors: 0 },
   dex: { name: 'DexScreener', role: 'live prices', ok: null, error: null, lastOk: 0, calls: 0, errors: 0 },
   rug: { name: 'RugCheck', role: 'safety checks', ok: null, error: null, lastOk: 0, calls: 0, errors: 0 },
+  rpc: { name: 'Solana chain', role: 'on-chain prices', ok: null, error: null, lastOk: 0, calls: 0, errors: 0 },
 };
+const DEFAULT_RPC = 'https://api.mainnet-beta.solana.com';
 
-async function getJson(src, url, timeoutMs = 12000) {
+async function getJson(src, url, timeoutMs = 12000, body) {
   const h = health[src];
   h.calls++;
   try {
     const res = await fetch(url, {
-      headers: { accept: 'application/json', 'user-agent': UA },
+      method: body ? 'POST' : 'GET',
+      headers: { accept: 'application/json', 'user-agent': UA, ...(body ? { 'content-type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) {
@@ -51,6 +55,7 @@ function fromGecko(pool) {
   const sym = String(a.name || '').split(' / ')[0].trim().slice(0, 24) || mint.slice(0, 5);
   const tx = a.transactions || {};
   return {
+    quote, quoteUsd: num(a.quote_token_price_usd),
     mint, sym, name: sym, pool: a.address, dex: rel.dex?.data?.id || '',
     priceUsd: num(a.base_token_price_usd), liqUsd: num(a.reserve_in_usd),
     volH1: num(a.volume_usd?.h1), volM5: num(a.volume_usd?.m5),
@@ -64,7 +69,9 @@ function fromGecko(pool) {
 function fromDexPair(p) {
   const mint = p.baseToken?.address;
   if (!mint || QUOTES.has(mint)) return null;
+  const native = num(p.priceNative);
   return {
+    quote: p.quoteToken?.address || '', quoteUsd: native ? num(p.priceUsd) / native : 0,
     mint, sym: String(p.baseToken.symbol || mint.slice(0, 5)).slice(0, 24),
     name: String(p.baseToken.name || '').slice(0, 60), pool: p.pairAddress, dex: p.dexId || '',
     priceUsd: num(p.priceUsd), liqUsd: num(p.liquidity?.usd),
@@ -122,7 +129,10 @@ async function rugReport(mint) {
   const top10Pct = holders.slice(0, 10).reduce((s, h) => s + num(h.pct), 0);
   const risks = (r.risks || []).map((x) => ({ name: String(x.name || ''), level: x.level || '' }));
   const devRisk = risks.find((x) => /rugged|creator/i.test(x.name));
+  const pools = markets.filter((m) => typeof m.liquidityA === 'string' && typeof m.liquidityB === 'string')
+    .map((m) => ({ pubkey: m.pubkey, type: m.marketType, vaults: [m.liquidityA, m.liquidityB] }));
   return {
+    pools,
     mintRevoked: r.mintAuthority == null && r.token?.mintAuthority == null,
     freezeRevoked: r.freezeAuthority == null && r.token?.freezeAuthority == null,
     lpLockedPct: main ? num(main.lp?.lpLockedPct) : null,
@@ -138,4 +148,26 @@ async function rugReport(mint) {
   };
 }
 
-module.exports = { health, geckoPools, dexTokens, dexLatestProfiles, rugReport };
+// Reads token-vault balances straight from the chain, at the newest state the node has.
+// Returns Map address -> { mint, amount }. One call covers every open position.
+async function chainBalances(rpcUrl, addresses) {
+  const out = new Map();
+  if (!addresses.length) return out;
+  const j = await getJson('rpc', rpcUrl || DEFAULT_RPC, 6000, {
+    jsonrpc: '2.0', id: 1, method: 'getMultipleAccounts',
+    params: [addresses.slice(0, 100), { encoding: 'jsonParsed', commitment: 'processed' }],
+  });
+  if (j.error) {
+    health.rpc.ok = false; health.rpc.error = String(j.error.message || 'RPC error').slice(0, 60);
+    throw new Error(health.rpc.error);
+  }
+  (j.result?.value || []).forEach((acc, i) => {
+    const info = acc?.data?.parsed?.info;
+    if (info && info.tokenAmount) out.set(addresses[i], { mint: info.mint, amount: num(info.tokenAmount.uiAmount) });
+    else out.set(addresses[i], null); // account closed or not a token account
+  });
+  return out;
+}
+
+const SOL = 'So11111111111111111111111111111111111111112';
+module.exports = { health, geckoPools, dexTokens, dexLatestProfiles, rugReport, chainBalances, SOL, QUOTES, DEFAULT_RPC };

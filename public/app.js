@@ -47,6 +47,10 @@ const FIELDS = [
   ['stopPct', 'Hard stop', '% loss', 0.5],
   ['trailArmPct', 'Trailing stop starts at', '% gain', 1],
   ['trailDistPct', 'Trailing stop distance', '% below peak', 0.5],
+  ['beArmPct', 'Move stop to entry at (0 = off)', '% gain', 1],
+  ['tpPct', 'Take profit at (0 = off)', '% gain', 1],
+  ['tpSellPct', 'Take profit sells', '% of position', 5],
+  ['staleMin', 'Close if going nowhere after (0 = off)', 'min', 5],
   ['maxHoldHours', 'Max hold time (0 = none)', 'hours', 0.5],
   ['Filter'],
   ['minVolH1', 'Min volume, last hour', '$', 1000],
@@ -58,6 +62,8 @@ const FIELDS = [
   ['feePct', 'Swap fee per side', '%', 0.05],
   ['slipPct', 'Extra slippage per side', '%', 0.1],
   ['maxPoolPct', 'Max share of a pool', '%', 0.1],
+  ['Speed'],
+  ['rpcUrl', 'Private Solana node address (optional, blank = free public node)', 'text'],
 ];
 
 let snap = null;
@@ -84,13 +90,15 @@ $('openSettings').onclick = () => {
   if (!snap) return;
   $('fields').innerHTML = FIELDS.map((f) => (f.length === 1
     ? `<h3>${f[0]}</h3>`
-    : `<div class="field"><label for="f_${f[0]}">${f[1]}</label><div class="in"><input id="f_${f[0]}" name="${f[0]}" type="number" step="${f[3]}" min="0" value="${snap.config[f[0]]}" required>${f[2] ? `<span class="unit">${f[2]}</span>` : ''}</div></div>`)).join('');
+    : f[2] === 'text'
+      ? `<div class="field wide"><label for="f_${f[0]}">${f[1]}</label><div class="in"><input id="f_${f[0]}" name="${f[0]}" type="url" placeholder="https://…" value="${esc(snap.config[f[0]])}" autocomplete="off"></div></div>`
+      : `<div class="field"><label for="f_${f[0]}">${f[1]}</label><div class="in"><input id="f_${f[0]}" name="${f[0]}" type="number" step="any" min="0" value="${snap.config[f[0]]}" required>${f[2] ? `<span class="unit">${f[2]}</span>` : ''}</div></div>`)).join('');
   $('settings').showModal();
 };
 $('settings').addEventListener('close', () => {
   if ($('settings').returnValue !== 'save') return;
   const body = {};
-  new FormData($('settingsForm')).forEach((v, k) => { body[k] = Number(v); });
+  new FormData($('settingsForm')).forEach((v, k) => { body[k] = k === 'rpcUrl' ? v : Number(v); });
   post('/api/config', body);
 });
 
@@ -148,9 +156,12 @@ function render(s) {
   $('positions').innerHTML = s.positions.length ? `<table><thead><tr>
     <th>Token</th><th class="r">Size</th><th class="r">Entry</th><th class="r">Now</th><th class="r">P&amp;L</th><th>Exit plan</th><th class="r">Held</th><th></th>
     </tr></thead><tbody>${s.positions.map((p) => {
-    const plan = p.trailing
+    const stop = p.stopMove < 0 ? `stop −${s.config.stopPct}%` : 'stop at entry';
+    const plan = (p.trailing
       ? `<span class="tag trail" title="Trailing stop is on: sells if the price falls to this">trail ${price(p.peak * (1 - s.config.trailDistPct / 100))}</span>`
-      : `<span class="tag">stop −${s.config.stopPct}%</span>`;
+      : `<span class="tag">${stop}</span>`)
+      + (p.tookProfit ? ' <span class="tag took" title="Part of this position was already sold for a profit">profit banked</span>' : '')
+      + (p.source === 'chain' ? ' <span class="tag fast" title="Price read straight from the blockchain every second">on-chain</span>' : ' <span class="tag" title="Price from the DexScreener feed every 3 seconds">feed</span>');
     return `<tr data-mint="${esc(p.mint)}"><td>${tok(p)}</td><td class="r">${usd(p.size)}</td><td class="r">${price(p.entryPrice)}</td>
       <td class="r">${price(p.price)}</td><td class="r ${cls(p.pnlUsd)}">${sPct(p.pnlPct)} · ${sUsd(p.pnlUsd)}</td>
       <td>${plan}</td><td class="r">${ago(s.now - p.openedAt)}</td>

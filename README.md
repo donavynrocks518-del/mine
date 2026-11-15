@@ -22,8 +22,25 @@ Keep the bot's window open while you test: closing it stops the bot. Everything 
 | **Filter** | Rejects a token if volume or liquidity is too low, the mint or freeze authority isn't revoked, the liquidity isn't locked, the top 10 holders own too much, or the creator is flagged for past rugs (RugCheck). |
 | **Analyst** | Scores survivors from 0 to 1 on buy pressure, momentum, activity, pool depth and safety. Rule-based, with every part shown on the token's check sheet. |
 | **Executor** | Buys with at most 8% of the account, at the live price plus fee, slippage and price impact. |
-| **Risk** | Checks prices every 4 seconds. Sells at the hard stop, trails winners, and writes a position off if its pool disappears. |
+| **Risk** | Reads each position's pool balances straight from the Solana chain once a second (price feed every 3 seconds as backup). Runs the exit plan below. |
 | **Logger** | Records the reason for every decision. The full history is in `data/log.jsonl`. |
+
+## The exit plan
+
+Each open position follows these rules, all editable in Settings:
+
+1. **Hard stop:** sell if the price falls 6% below entry.
+2. **Stop to entry:** once the price is up 8%, the stop moves up to the entry price.
+3. **Trailing stop:** once up 12%, sell if the price falls 8% from its peak.
+4. **Take profit:** at +25%, sell half and let the rest run behind the trailing stop.
+5. **Going nowhere:** close a position that hasn't reached the trailing stop after 45 minutes.
+6. **Time limit:** close anything still open after 6 hours.
+
+## Price speed
+
+Positions tagged **on-chain** are priced from the pool's own balances, read from a Solana node every second. This works for Pump.fun AMM and Raydium standard pools. Other pool types (Meteora, Orca) are tagged **feed** and use DexScreener every 3 seconds.
+
+The free public Solana node is fine for a paper test. For faster and steadier reads, paste a private node address (from Helius or QuickNode) into Settings → Speed.
 
 ## Using the dashboard
 
@@ -38,7 +55,7 @@ Keep the bot's window open while you test: closing it stops the bot. Everything 
 
 Fills are modelled, not real. Buys and sells pay a swap fee, a slippage allowance and the price impact of the trade against the pool's liquidity. A stop is a trigger, not a guaranteed price: if a token drops 30% between two price checks, the loss is 30%, not 6%.
 
-Real trading is still harder than this. Paper fills ignore failed transactions, network congestion, priority fees and bots that front-run you, and the public price feeds lag the chain by several seconds. Treat a good paper result as a reason to keep testing, not as proof.
+Real trading is still harder than this. Paper fills ignore failed transactions, network congestion, priority fees and bots that front-run you, and the prices are still about a second old when the bot acts. Treat a good paper result as a reason to keep testing, not as proof.
 
 ## Data sources
 
