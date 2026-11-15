@@ -1,0 +1,13 @@
+{
+  "name": "paper-desk",
+  "version": "1.0.0",
+  "description": "Six-agent Solana memecoin paper-trading bot with a live desktop dashboard. No real money.",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js --open"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
