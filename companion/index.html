@@ -170,6 +170,26 @@ input, textarea, select { font: inherit; color: inherit; }
 .places { display: flex; gap: 6px; flex-wrap: wrap; }
 .places button { padding: 6px 10px; border-radius: 999px; border: 1px solid var(--rope); background: var(--sea); font-size: 12px; }
 .foot { color: var(--mist); font-size: 12px; margin-top: 18px; line-height: 1.5; }
+.hunt {
+  display: flex; gap: 10px 14px; align-items: center; flex-wrap: wrap;
+  padding-block: 8px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  background: var(--hull); border-top: 1px solid var(--rope);
+}
+.th { flex: 1; min-width: 200px; display: flex; gap: 10px; align-items: center; }
+.th .badge { font-family: var(--display); font-weight: 700; font-size: 12px; padding: 3px 8px; border-radius: 6px; background: var(--hull-2); color: var(--mist); white-space: nowrap; }
+.th.live .badge { background: var(--gold); color: #1b1300; }
+.th .txt { min-width: 0; }
+.th .txt b { font-family: var(--display); font-size: 15px; font-variant-numeric: tabular-nums; }
+.th .txt div { font-size: 12px; color: var(--mist); }
+.counter { display: flex; gap: 8px; align-items: center; flex: 1 1 320px; min-width: 0; }
+.counter .odds { flex: 1; min-width: 0; font-size: 12px; color: var(--mist); line-height: 1.35; }
+.counter .odds b { color: var(--foam); font-variant-numeric: tabular-nums; }
+.plus { padding: 10px 16px; border-radius: 12px; border: 0; background: var(--gold); color: #1b1300; font-family: var(--display); font-weight: 700; font-size: 16px; }
+.minus { width: 38px; height: 38px; border-radius: 10px; border: 1px solid var(--rope); background: var(--hull-2); font-size: 18px; }
+.sched { display: grid; gap: 8px; }
+.sched .s { display: grid; grid-template-columns: 1.1fr 1fr 1fr .8fr 34px; gap: 6px; align-items: center; }
+.sched input, .sched select { width: 100%; padding: 7px 8px; border-radius: 8px; border: 1px solid var(--rope); background: var(--sea); min-width: 0; }
+.sched .lbl { font-size: 11px; color: var(--mist); }
 .toast {
   position: fixed; left: 50%; bottom: calc(70px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); z-index: 30;
   background: var(--foam); color: var(--sea); padding: 8px 14px; border-radius: 10px; font-weight: 600; font-size: 13px; max-width: calc(100% - 32px);
@@ -193,6 +213,14 @@ input, textarea, select { font: inherit; color: inherit; }
   <div class="zoom"><button type="button" id="zin" aria-label="Zoom in">+</button><button type="button" id="zout" aria-label="Zoom out">−</button><button type="button" id="zfit" aria-label="Show whole map">⤢</button></div>
 </div>
 
+<section class="hunt" aria-label="Pirate token hunt">
+  <div class="th" id="th"><span class="badge">TREASURE HOURS</span><div class="txt"><b>…</b></div></div>
+  <div class="counter">
+    <div class="odds" id="odds"></div>
+    <button class="minus" id="chestMinus" type="button" aria-label="Undo last chest">−</button>
+    <button class="plus" id="chestPlus" type="button">+1 chest</button>
+  </div>
+</section>
 <footer class="timers" id="timers" aria-label="Timers"></footer>
 
 <section class="sheet" id="sheet" hidden aria-live="polite"></section>
@@ -222,6 +250,12 @@ const TYPES = {
   other: { label: "Other", letter: "•", color: "var(--tide)" },
 };
 const PRESETS = [60, 120, 300];
+// Treasure Hours as reported by guides in Nov 2026 (not confirmed by Epic). Times are US Eastern; editable in the app.
+const DEFAULT_HUNT = { odds: 137500, hours: [
+  { day: 6, start: "14:00", end: "16:00", boost: 1.5 },
+  { day: 6, start: "21:00", end: "23:00", boost: 2 },
+] };
+const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, attrs = {}, ...kids) => {
@@ -258,6 +292,13 @@ let sel = null;                 // selected spot id
 let draft = null;               // {u, v} while adding
 let confirmDelete = false;
 let store = null;               // {spots, matches} db refs, or null when saving locally
+let hunt = local.get("cc.hunt", DEFAULT_HUNT);  // base odds + Treasure Hours schedule, shared with the squad
+let round = local.get("cc.round", { id: "local", start: Date.now() }); // the squad's current match
+let squad = {};                 // userId -> {round, count, total}
+let me = null;                  // this viewer's id, when signed in
+let mine = local.get("cc.mine", { round: round.id, count: 0, total: 0 });
+let dbRef = null;
+let alerted = local.get("cc.alerted", {});
 
 /* ---------- saving ---------- */
 // Spots and matches live in the artifact's store, so a phone and a computer see the same map.
@@ -298,6 +339,24 @@ async function connect() {
     render();
   }, () => { clearTimeout(slow); store = null; $("storeNote").textContent = "Saved on this device"; });
   listen("spots", applySpots); listen("matches", applyMatches);
+  dbRef = db;
+  db.doc("chart/hunt").onSnapshot((snap) => { if (snap.exists) { hunt = { ...DEFAULT_HUNT, ...snap.data() }; local.set("cc.hunt", hunt); renderHunt(); } }, () => {});
+  db.doc("chart/round").onSnapshot((snap) => {
+    if (snap.exists) { round = snap.data(); local.set("cc.round", round); }
+    if (mine.round !== round.id) { mine = { round: round.id, count: 0, total: mine.total || 0 }; local.set("cc.mine", mine); }
+    renderHunt();
+  }, () => {});
+  const user = await (window.claude?.use?.("user") ?? Promise.resolve(null)).catch(() => null);
+  me = user ? await user.id() : null;
+  if (me) {
+    db.collection("squad").onSnapshot((snap) => {
+      squad = {};
+      for (const d of snap.docs) squad[d.id] = d.data();
+      if (squad[me]) { const m = squad[me]; mine = { round: m.round, count: m.count || 0, total: Math.max(m.total || 0, mine.total || 0) }; if (mine.round !== round.id) mine = { round: round.id, count: 0, total: mine.total }; }
+      renderHunt(user);
+    }, () => {});
+    window.__user = user;
+  }
 }
 
 /* ---------- map: pan and zoom ---------- */
@@ -435,7 +494,99 @@ function renderTimers() {
   }
 }
 
-function render() { renderPins(); renderFilters(); renderTimers(); renderSheet(); }
+function render() { renderPins(); renderFilters(); renderTimers(); renderSheet(); renderHunt(); }
+
+/* ---------- Treasure Hours ---------- */
+// Wall-clock time in US Eastern -> real moment, whatever this device's time zone.
+const ET = "America/New_York";
+function etParts(ms) {
+  const f = new Intl.DateTimeFormat("en-US", { timeZone: ET, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23", weekday: "short" });
+  const p = Object.fromEntries(f.formatToParts(new Date(ms)).map((x) => [x.type, x.value]));
+  return { y: +p.year, m: +p.month, d: +p.day, h: +p.hour, min: +p.minute, wd: DAYS.indexOf(p.weekday) };
+}
+function etToMs(y, m, d, hh, mm) {
+  let guess = Date.UTC(y, m - 1, d, hh, mm);
+  for (let i = 0; i < 2; i++) {
+    const p = etParts(guess);
+    const asUtc = Date.UTC(p.y, p.m - 1, p.d, p.h, p.min);
+    guess += Date.UTC(y, m - 1, d, hh, mm) - asUtc;
+  }
+  return guess;
+}
+// The session running now, or the next one coming up.
+function treasure(now = Date.now()) {
+  let best = null;
+  for (let k = -1; k <= 7; k++) {
+    const p = etParts(now + k * 86400000);
+    for (const h of hunt.hours || []) {
+      if (h.day !== p.wd) continue;
+      const [sh, sm] = String(h.start).split(":").map(Number), [eh, em] = String(h.end).split(":").map(Number);
+      if (![sh, sm, eh, em].every(Number.isFinite)) continue;
+      const start = etToMs(p.y, p.m, p.d, sh, sm);
+      let end = etToMs(p.y, p.m, p.d, eh, em); if (end <= start) end += 86400000;
+      if (end <= now) continue;
+      const c = { start, end, boost: Number(h.boost) || 1, live: start <= now };
+      if (!best || (c.live && !best.live) || (c.live === best.live && c.start < best.start)) best = c;
+    }
+  }
+  return best;
+}
+function span(ms) {
+  const m = Math.max(0, Math.round(ms / 60000));
+  if (m < 60) return `${m}m`;
+  if (m < 1440) return `${Math.floor(m / 60)}h ${m % 60}m`;
+  return `${Math.floor(m / 1440)}d ${Math.floor((m % 1440) / 60)}h`;
+}
+const oneIn = (p) => (p > 0 ? `1 in ${Math.round(1 / p).toLocaleString()}` : "–");
+const atLeastOne = (p, n) => 1 - Math.pow(1 - p, n);
+const pct = (x) => `${(x * 100).toFixed(x >= 0.01 ? 2 : x >= 0.0001 ? 3 : 4)}%`;
+
+async function renderHunt(user = window.__user) {
+  const now = Date.now();
+  const t = treasure(now);
+  const th = $("th"); th.classList.toggle("live", !!(t && t.live));
+  th.querySelector(".badge").textContent = t && t.live ? `LIVE · ${t.boost}× ODDS` : "TREASURE HOURS";
+  const txt = th.querySelector(".txt"); txt.textContent = "";
+  if (!t) txt.append(el("b", {}, "No sessions set"), el("div", {}, "Add them under Matches"));
+  else if (t.live) txt.append(el("b", {}, `Ends in ${span(t.end - now)}`), el("div", {}, "Open as many chests as you can"));
+  else txt.append(el("b", {}, `Next in ${span(t.start - now)}`),
+    el("div", {}, `${new Date(t.start).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })} · ${t.boost}× odds`));
+
+  const base = 1 / (Number(hunt.odds) || 137500);
+  const p = base * (t && t.live ? t.boost : 1);
+  const members = Object.entries(squad).filter(([, v]) => v.round === round.id);
+  const squadCount = members.reduce((n, [id, v]) => n + (id === me ? mine.count : (v.count || 0)), 0) + (me && !squad[me] ? mine.count : 0);
+  const matchChests = me ? squadCount : mine.count;
+  const odds = $("odds"); odds.textContent = "";
+  odds.append(el("div", {}, el("b", {}, `${matchChests} chest${matchChests === 1 ? "" : "s"}`), me && members.length > 1 ? ` this match (squad of ${members.length})` : " this match", ` · now ${oneIn(p)} each`),
+    el("div", {}, `Chance this match: ${pct(atLeastOne(p, matchChests))} · All-time: ${mine.total} chests, ${pct(atLeastOne(base, mine.total))}`));
+  if (user && members.length > 1) {
+    const ps = await user.profiles(members.map(([id]) => id)).catch(() => ({}));
+    odds.append(el("div", {}, members.map(([id, v]) => `${id === me ? "You" : (ps[id]?.name || "Squadmate")} ${id === me ? mine.count : v.count || 0}`).join(" · ")));
+  }
+}
+let chestWrite = Promise.resolve();
+function bumpChest(d) {
+  if (d < 0 && mine.count <= 0) return;
+  if (mine.round !== round.id) mine = { round: round.id, count: 0, total: mine.total || 0 };
+  mine.count += d; mine.total = Math.max(0, (mine.total || 0) + d);
+  local.set("cc.mine", mine);
+  const m = currentMatch(true); m.chests = Math.max(0, (m.chests || 0) + d); save("matches");
+  if (dbRef && me) {
+    const body = { round: mine.round, count: mine.count, total: mine.total, t: Date.now() };
+    chestWrite = chestWrite.then(() => dbRef.doc(`squad/${me}`).set(body)).catch(() => {});
+  }
+  renderHunt();
+}
+function newRound() {
+  round = { id: uid(), start: Date.now() };
+  local.set("cc.round", round);
+  mine = { round: round.id, count: 0, total: mine.total || 0 }; local.set("cc.mine", mine);
+  if (dbRef) dbRef.doc("chart/round").set(round).catch(() => {});
+  if (dbRef && me) dbRef.doc(`squad/${me}`).set({ round: round.id, count: 0, total: mine.total, t: Date.now() }).catch(() => {});
+}
+$("chestPlus").onclick = () => bumpChest(1);
+$("chestMinus").onclick = () => bumpChest(-1);
 
 /* ---------- timers ---------- */
 let audio = null;
@@ -464,6 +615,12 @@ function startTimer(spot, secs) {
 function stopTimer(id) { timers = timers.filter((t) => t.id !== id); local.set("cc.timers", timers); render(); }
 setInterval(() => {
   const now = Date.now(); let rang = false;
+  const tt = treasure(now);
+  if (tt && tt.live && !alerted[tt.start]) {
+    alerted[tt.start] = true; local.set("cc.alerted", alerted);
+    beep(); toast(`Treasure Hour is live: ${tt.boost}× odds`);
+  }
+  if (now % 15000 < 1000) renderHunt();
   for (const t of timers) if (!t.rang && t.end <= now) { t.rang = true; rang = true; }
   if (rang) { beep(); local.set("cc.timers", timers); }
   // Finished timers clear themselves after two minutes.
@@ -575,7 +732,7 @@ function renderMatches(sh) {
     el("button", { type: "button", class: "x", "aria-label": "Close", onclick: closeSheet }, "×")));
   sh.append(el("div", { class: "row", style: "margin-top:12px" },
     el("button", { type: "button", class: "btn gold", onclick: () => {
-      matches.unshift({ id: uid(), start: Date.now(), visits: [] }); save("matches"); toast("New match started"); render();
+      matches.unshift({ id: uid(), start: Date.now(), visits: [] }); save("matches"); newRound(); toast("New match started · chest count reset"); render();
     } }, "Start new match")));
 
   // Best spots: by hit rate, then by visits.
@@ -587,14 +744,45 @@ function renderMatches(sh) {
     : el("p", { class: "sub" }, "Log a few visits with Found it or Empty and your best spots show up here."));
 
   sh.append(el("h3", {}, "History"));
-  const recent = matches.filter((m) => m.visits.length || m === cur).slice(0, 25);
+  const recent = matches.filter((m) => m.visits.length || m.chests || m === cur).slice(0, 25);
   sh.append(recent.length ? el("div", { class: "list" }, recent.map((m) => {
     const f = m.visits.filter((v) => v.found).length;
     return el("div", { class: "item" },
       el("div", { class: "grow" }, el("b", {}, when(m.start)), el("p", { class: "sub" },
-        m.visits.length ? m.visits.map((v) => { const s = spots.find((x) => x.id === v.spot); return `${s ? (s.name || nearest(s.u, s.v)) : "Deleted spot"} ${v.found ? "✓" : "✕"}`; }).join(" · ") : "Nothing logged yet")),
+        [m.chests ? `${m.chests} chest${m.chests === 1 ? "" : "s"}` : "", ...m.visits.map((v) => { const s = spots.find((x) => x.id === v.spot); return `${s ? (s.name || nearest(s.u, s.v)) : "Deleted spot"} ${v.found ? "✓" : "✕"}`; })].filter(Boolean).join(" · ") || "Nothing logged yet")),
       el("span", { class: `tag ${f ? "ok" : "no"}` }, `${f}/${m.visits.length}`));
   })) : el("p", { class: "sub" }, "No matches logged yet."));
+
+  const rows = (hunt.hours || []).map((h) => ({ ...h }));
+  const box = el("div", { class: "sched" });
+  const draw = () => {
+    box.textContent = "";
+    box.append(el("div", { class: "s" }, ["Day", "Start ET", "End ET", "Boost", ""].map((x) => el("span", { class: "lbl" }, x))));
+    rows.forEach((h, i) => {
+      const day = el("select", { "aria-label": "Day" }, DAYS.map((d, k) => el("option", { value: String(k), selected: k === h.day }, d)));
+      day.onchange = () => { h.day = Number(day.value); };
+      const hhmm = (v) => { const m = /^(\d{1,2}):?(\d{2})$/.exec(v.trim()); return m && +m[1] < 24 && +m[2] < 60 ? `${m[1].padStart(2, "0")}:${m[2]}` : null; };
+      const st = el("input", { type: "text", inputmode: "numeric", value: h.start, placeholder: "14:00", "aria-label": "Start time, Eastern, 24-hour" });
+      st.onchange = () => { const v = hhmm(st.value); if (v) h.start = st.value = v; else st.value = h.start; };
+      const en = el("input", { type: "text", inputmode: "numeric", value: h.end, placeholder: "16:00", "aria-label": "End time, Eastern, 24-hour" });
+      en.onchange = () => { const v = hhmm(en.value); if (v) h.end = en.value = v; else en.value = h.end; };
+      const bo = el("input", { type: "number", min: "1", step: "0.5", value: String(h.boost), "aria-label": "Odds boost" }); bo.onchange = () => { h.boost = Number(bo.value) || 1; };
+      box.append(el("div", { class: "s" }, day, st, en, bo, el("button", { type: "button", class: "btn small ghost", "aria-label": "Remove session", onclick: () => { rows.splice(i, 1); draw(); } }, "×")));
+    });
+  };
+  draw();
+  const oddsIn = el("input", { id: "baseOdds", type: "number", min: "1", value: String(hunt.odds) });
+  sh.append(el("h3", {}, "Treasure Hours"), box,
+    el("div", { class: "row", style: "margin-top:8px" },
+      el("button", { type: "button", class: "btn small ghost", onclick: () => { rows.push({ day: 6, start: "14:00", end: "16:00", boost: 2 }); draw(); } }, "Add session"),
+      el("button", { type: "button", class: "btn small gold", onclick: () => {
+        hunt = { odds: Number(oddsIn.value) || 137500, hours: rows.filter((h) => h.start && h.end) };
+        local.set("cc.hunt", hunt);
+        if (dbRef) dbRef.doc("chart/hunt").set(hunt).catch(() => {});
+        toast("Treasure Hours saved"); render();
+      } }, "Save")),
+    el("div", { class: "field" }, el("label", { for: "baseOdds" }, "Normal odds per chest: 1 in"), oddsIn),
+    el("p", { class: "sub", style: "margin-top:6px" }, "Times are US Eastern, as guides reported them in November 2026. Epic hasn't confirmed them, so check its Fortnite Status posts and fix them here if they change. Saving updates everyone you've shared the page with."));
 
   sh.append(el("h3", {}, "Jump to a location"),
     el("div", { class: "places" }, [...MAP.pois].sort((a, b) => a.name.localeCompare(b.name)).map((p) =>
