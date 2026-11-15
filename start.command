@@ -5,4 +5,5 @@ if ! command -v node >/dev/null 2>&1; then
   echo "Paper Desk needs Node.js. Install the LTS version from https://nodejs.org and run this again."
   exit 1
 fi
+[ -d node_modules ] || npm install --omit=dev
 exec node server.js --open

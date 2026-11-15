@@ -62,6 +62,9 @@ function fromGecko(pool) {
     chgM5: num(a.price_change_percentage?.m5), chgH1: num(a.price_change_percentage?.h1),
     buysH1: num(tx.h1?.buys), sellsH1: num(tx.h1?.sells),
     buysM5: num(tx.m5?.buys), sellsM5: num(tx.m5?.sells),
+    chgH6: num(a.price_change_percentage?.h6), chgH24: num(a.price_change_percentage?.h24),
+    volH6: num(a.volume_usd?.h6), volH24: num(a.volume_usd?.h24),
+    buyersH1: num(tx.h1?.buyers), sellersH1: num(tx.h1?.sellers), links: null,
     fdv: num(a.fdv_usd), createdAt: Date.parse(a.pool_created_at) || 0, img: null,
   };
 }
@@ -79,6 +82,12 @@ function fromDexPair(p) {
     chgM5: num(p.priceChange?.m5), chgH1: num(p.priceChange?.h1),
     buysH1: num(p.txns?.h1?.buys), sellsH1: num(p.txns?.h1?.sells),
     buysM5: num(p.txns?.m5?.buys), sellsM5: num(p.txns?.m5?.sells),
+    chgH6: num(p.priceChange?.h6), chgH24: num(p.priceChange?.h24),
+    volH6: num(p.volume?.h6), volH24: num(p.volume?.h24),
+    links: {
+      websites: (p.info?.websites || []).length,
+      socials: (p.info?.socials || []).map((x) => String(x.type || '').slice(0, 20)).slice(0, 8),
+    },
     fdv: num(p.fdv), createdAt: num(p.pairCreatedAt), img: p.info?.imageUrl || null,
   };
 }
@@ -131,7 +140,18 @@ async function rugReport(mint) {
   const devRisk = risks.find((x) => /rugged|creator/i.test(x.name));
   const pools = markets.filter((m) => typeof m.liquidityA === 'string' && typeof m.liquidityB === 'string')
     .map((m) => ({ pubkey: m.pubkey, type: m.marketType, vaults: [m.liquidityA, m.liquidityB] }));
+  const supply = num(r.token?.supply);
+  const share = (amount) => (supply ? +((num(amount) / supply) * 100).toFixed(2) : null);
   return {
+    desc: String(r.fileMeta?.description || '').slice(0, 400),
+    topHolderPcts: holders.slice(0, 10).map((h) => +num(h.pct).toFixed(1)),
+    insiderHolders: holders.slice(0, 20).filter((h) => h.insider).length,
+    insiderNetworks: (r.insiderNetworks || []).slice(0, 5).map((n) => ({ wallets: num(n.size), holdsPct: share(n.currentHolding ?? n.tokenAmount) })),
+    creatorHoldsPct: share(r.creatorBalance),
+    creatorOtherTokens: Array.isArray(r.creatorTokens) ? r.creatorTokens.length : null,
+    lpProviders: num(r.totalLPProviders),
+    jupVerified: !!r.verification?.jup_verified,
+    launchpad: r.launchpad?.name || null,
     pools,
     mintRevoked: r.mintAuthority == null && r.token?.mintAuthority == null,
     freezeRevoked: r.freezeAuthority == null && r.token?.freezeAuthority == null,

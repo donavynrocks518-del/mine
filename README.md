@@ -9,7 +9,7 @@ A six-agent Solana memecoin trading bot that trades **pretend money only**, with
 3. Start it:
    - **Windows:** double-click `start.bat`
    - **Mac:** double-click `start.command`
-   - **Any system:** run `node server.js --open` in this folder
+   - **Any system:** run `npm install` once, then `node server.js --open` in this folder
 4. Your browser opens the dashboard at <http://localhost:4280>.
 
 Keep the bot's window open while you test: closing it stops the bot. Everything is saved in the `data` folder, so you can stop and restart without losing the account.
@@ -20,7 +20,7 @@ Keep the bot's window open while you test: closing it stops the bot. Everything 
 |---|---|
 | **Scout** | Finds new and trending Solana pairs (GeckoTerminal, DexScreener). |
 | **Filter** | Rejects a token if volume or liquidity is too low, the mint or freeze authority isn't revoked, the liquidity isn't locked, the top 10 holders own too much, or the creator is flagged for past rugs (RugCheck). |
-| **Analyst** | Scores survivors from 0 to 1 on buy pressure, momentum, activity, pool depth and safety. Rule-based, with every part shown on the token's check sheet. |
+| **Analyst** | Scores survivors from 0 to 1 on buy pressure, momentum, activity, pool depth and safety, with every part shown on the token's check sheet. Optionally asks Claude for the final verdict (see AI Analyst below). |
 | **Executor** | Buys with at most 8% of the account, at the live price plus fee, slippage and price impact. |
 | **Risk** | Reads each position's pool balances straight from the Solana chain once a second (price feed every 3 seconds as backup). Runs the exit plan below. |
 | **Logger** | Records the reason for every decision. The full history is in `data/log.jsonl`. |
@@ -41,6 +41,16 @@ Each open position follows these rules, all editable in Settings:
 Positions tagged **on-chain** are priced from the pool's own balances, read from a Solana node every second. This works for Pump.fun AMM and Raydium standard pools. Other pool types (Meteora, Orca) are tagged **feed** and use DexScreener every 3 seconds.
 
 The free public Solana node is fine for a paper test. For faster and steadier reads, paste a private node address (from Helius or QuickNode) into Settings → Speed.
+
+## AI Analyst (optional)
+
+Off by default. When on, every token that passes the filters and has a reasonable rule score is sent to Claude, which returns a buy or pass verdict, a score, a short reason and a list of green and red flags. All of it appears on the token's check sheet.
+
+To turn it on, open Settings → AI Analyst, tick the box and paste an Anthropic API key from <https://console.anthropic.com>. The key is saved in `data/secrets.json` on your computer and is sent only to Anthropic.
+
+- **What it sees:** price, volume and trade counts, holder spread, insider clusters, the creator's holdings, safety flags, and whether the token lists a website or socials. It does not read the posts on those socials.
+- **Cost:** you pay Anthropic per call. With the default model (`claude-opus-5-5`) expect roughly 1 to 3 cents per token reviewed. Setting the model to `claude-haiku-5-5` is far cheaper and less thorough.
+- **If it fails:** a bad key, a network error or an unusable answer falls back to the rule score, and the reason is written to the log.
 
 ## Using the dashboard
 

@@ -6,6 +6,7 @@ const { EventEmitter } = require('events');
 const fs = require('fs');
 const path = require('path');
 const feeds = require('./feeds');
+const ai = require('./ai');
 
 const DEFAULT_CONFIG = {
   startBalance: 280, // pretend dollars; applied on reset
@@ -29,6 +30,8 @@ const DEFAULT_CONFIG = {
   maxPoolPct: 2, // never be more than this share of a pool
   cooldownMin: 120, // don't re-buy the same token within this time
   rpcUrl: '', // optional private Solana node; blank uses the free public one
+  aiAnalyst: false, // ask Claude for a verdict on tokens that pass the filters (needs an API key)
+  aiModel: ai.DEFAULT_MODEL,
 };
 
 const LIMITS = {
@@ -49,6 +52,7 @@ const REASONS = {
   dev: 'Dev wallet linked to past rugs',
   unverified: 'Safety report unavailable',
   score: 'Analyst score below pass mark',
+  ai: 'AI Analyst said no',
 };
 
 // Pool types whose price is simply one vault balance divided by the other.
@@ -69,6 +73,12 @@ class Desk extends EventEmitter {
     this.logFile = path.join(dataDir, 'log.jsonl');
     fs.mkdirSync(dataDir, { recursive: true });
     this.config = { ...DEFAULT_CONFIG };
+    // Secrets live in their own file and are never sent to the dashboard.
+    this.secretsFile = path.join(dataDir, 'secrets.json');
+    this.secrets = {};
+    try { this.secrets = JSON.parse(fs.readFileSync(this.secretsFile, 'utf8')); } catch { /* none saved */ }
+    this.aiQueue = [];
+    this.aiActive = 0;
     this.fresh();
     this.load();
     this.timers = [];
@@ -88,7 +98,7 @@ class Desk extends EventEmitter {
     this.positions = [];
     this.trades = [];
     this.curve = [{ t: Date.now(), v: this.cash }];
-    this.counters = { scanned: 0, killed: 0, scored: 0, traded: 0, wins: 0, losses: 0, reasons: 0 };
+    this.counters = { scanned: 0, killed: 0, scored: 0, traded: 0, wins: 0, losses: 0, reasons: 0, aiCalls: 0, aiInTok: 0, aiOutTok: 0 };
     this.why = Object.fromEntries(Object.keys(REASONS).map((k) => [k, 0]));
     this.agents = {};
     this.logs = []; // decisions that matter
@@ -145,6 +155,8 @@ class Desk extends EventEmitter {
       if (Number.isFinite(v)) out[k] = Math.max(lo, Math.min(hi, v));
     }
     out.maxOpen = Math.round(out.maxOpen);
+    if (typeof c.aiAnalyst === 'boolean') out.aiAnalyst = c.aiAnalyst;
+    if (typeof c.aiModel === 'string') out.aiModel = /^claude-[a-z0-9.-]{3,60}$/.test(c.aiModel.trim()) ? c.aiModel.trim() : ai.DEFAULT_MODEL;
     if (typeof c.rpcUrl === 'string') {
       const u = c.rpcUrl.trim();
       out.rpcUrl = /^https:\/\/[^\s]{4,300}$/.test(u) ? u : '';
@@ -170,13 +182,14 @@ class Desk extends EventEmitter {
 
   // ---------- lifecycle ----------
   start() {
-    const every = (ms, fn) => this.timers.push(setInterval(() => fn().catch((e) => this.softError(e)), ms));
+    const every = (ms, fn) => this.timers.push(setInterval(() => Promise.resolve().then(fn).catch((e) => this.softError(e)), ms));
     every(20000, () => this.scout());
     every(60000, () => this.scoutProfiles());
     every(60000, () => this.secondLooks());
     every(1000, () => this.riskChain());
     every(3000, () => this.riskFeed());
     every(1300, () => this.pumpRugQueue());
+    every(700, () => this.pumpAiQueue());
     this.timers.push(setInterval(() => this.sample(), 15000));
     this.timers.push(setInterval(() => this.save(), 8000));
     this.scout().catch((e) => this.softError(e));
@@ -200,14 +213,28 @@ class Desk extends EventEmitter {
   reset() {
     this.fresh();
     this.rugQueue = [];
+    this.aiQueue = [];
     try { fs.renameSync(this.logFile, path.join(this.dataDir, `log-${Date.now()}.jsonl`)); } catch { /* no log yet */ }
     this.log('logger', 'info', `Account reset to ${money(this.cash)} of paper money`);
     this.dirty = true;
     this.save();
   }
 
+  aiKey() {
+    return this.secrets.anthropicKey || process.env.ANTHROPIC_API_KEY || '';
+  }
+
+  aiOn() {
+    return this.config.aiAnalyst && !!this.aiKey() && Date.now() >= (this.aiPausedUntil || 0);
+  }
+
   setConfig(patch) {
+    if (typeof patch.aiKey === 'string' && patch.aiKey.trim()) {
+      this.secrets.anthropicKey = patch.aiKey.trim().slice(0, 300);
+      try { fs.writeFileSync(this.secretsFile, JSON.stringify(this.secrets), { mode: 0o600 }); } catch (e) { console.error('Could not save the API key:', e.message); }
+    }
     this.config = this.cleanConfig(patch);
+    this.aiPausedUntil = 0; // a new key or model deserves a fresh try
     this.log('logger', 'info', 'Settings changed');
   }
 
@@ -357,10 +384,84 @@ class Desk extends EventEmitter {
     const score = parts.reduce((s, p) => s + p.weight * p.value, 0);
     ev.parts = parts; ev.score = score;
     this.counters.scored++;
+    if (this.aiOn()) {
+      // Don't spend an AI call on a token the rules already rate as clearly weak.
+      const floor = Math.max(0, cfg.minScore - 0.2);
+      ev.checks.push({ key: 'score', label: `Rule score ≥ ${floor.toFixed(2)} (worth an AI look)`, pass: score >= floor, value: score.toFixed(2) });
+      if (score < floor) return this.kill(ev, 'analyst', 'score', `rule score ${score.toFixed(2)} · not worth an AI look`);
+      if (this.aiQueue.length < 50) return this.aiQueue.push(ev);
+      ev.checks.pop(); // AI is backed up: decide on the rules alone
+    }
+    this.decideOnRules(ev);
+  }
+
+  decideOnRules(ev) {
+    const cfg = this.config; const score = ev.score;
     const pass = score >= cfg.minScore;
     ev.checks.push({ key: 'score', label: `Analyst score ≥ ${cfg.minScore.toFixed(2)}`, pass, value: score.toFixed(2) });
     if (!pass) return this.kill(ev, 'analyst', 'score', `score ${score.toFixed(2)} < ${cfg.minScore.toFixed(2)}`);
-    this.log('analyst', 'pass', `passed · score ${score.toFixed(2)}`, c, { score });
+    this.log('analyst', 'pass', `passed · score ${score.toFixed(2)}`, ev.cand, { score });
+    this.execute(ev).catch((e) => this.softError(e));
+  }
+
+  pumpAiQueue() {
+    while (this.aiActive < 2 && this.aiQueue.length) {
+      const ev = this.aiQueue.shift();
+      this.aiActive++;
+      this.aiReview(ev).catch((e) => this.softError(e)).finally(() => { this.aiActive--; });
+    }
+  }
+
+  // Everything the AI Analyst gets to see about one token.
+  brief(ev) {
+    const c = ev.cand; const r = ev.rug;
+    const round = (n, d = 2) => (Number.isFinite(n) ? +n.toFixed(d) : null);
+    return {
+      symbol: c.sym, name: c.name, description_by_creator: r.desc || null,
+      exchange: c.dex, launchpad: r.launchpad, pool_age_minutes: c.createdAt ? Math.round((Date.now() - c.createdAt) / 60000) : null,
+      market: {
+        price_usd: c.priceUsd, market_cap_usd: Math.round(c.fdv), liquidity_usd: Math.round(c.liqUsd),
+        volume_usd: { m5: Math.round(c.volM5), h1: Math.round(c.volH1), h6: Math.round(c.volH6 || 0), h24: Math.round(c.volH24 || 0) },
+        price_change_pct: { m5: round(c.chgM5), h1: round(c.chgH1), h6: round(c.chgH6), h24: round(c.chgH24) },
+        trades_last_hour: { buys: c.buysH1, sells: c.sellsH1 }, trades_last_5m: { buys: c.buysM5, sells: c.sellsM5 },
+        unique_traders_last_hour: c.buyersH1 ? { buyers: c.buyersH1, sellers: c.sellersH1 } : null,
+      },
+      holders: {
+        total: r.holders, top10_pct_excluding_pools: round(r.top10Pct, 1), top_holder_pcts: r.topHolderPcts,
+        insider_flagged_among_top20: r.insiderHolders, insider_networks: r.insiderNetworks,
+      },
+      creator: { holds_pct: r.creatorHoldsPct, other_tokens_created: r.creatorOtherTokens },
+      safety: {
+        lp_locked_pct: r.marketType === 'pump_fun' ? 100 : round(r.lpLockedPct, 0), lp_providers: r.lpProviders,
+        rugcheck_danger_flags: r.dangers, rugcheck_warnings: r.warns, jupiter_verified: r.jupVerified,
+      },
+      presence: c.links ? { websites: c.links.websites, socials: c.links.socials } : 'unknown',
+      desk: { rule_based_score: round(ev.score), rule_score_parts: ev.parts.map((p) => ({ part: p.label, value: round(p.value) })), pass_mark: this.config.minScore },
+    };
+  }
+
+  async aiReview(ev) {
+    const cfg = this.config; let c = ev.cand;
+    try { // fresh numbers, plus the website and socials listing
+      const live = (await feeds.dexTokens([c.mint])).get(c.mint);
+      if (live && live.priceUsd) { c = { ...c, ...live, name: c.name || live.name, pool: c.pool, createdAt: c.createdAt || live.createdAt, buyersH1: c.buyersH1, sellersH1: c.sellersH1 }; ev.cand = c; }
+    } catch { /* use the scouted numbers */ }
+    let out;
+    try {
+      out = await ai.review({ apiKey: this.aiKey(), model: cfg.aiModel, brief: this.brief(ev), client: this.aiClient });
+    } catch (e) {
+      // A rejected key won't fix itself: stop calling for a few minutes instead of failing on every token.
+      if (/API key|model/.test(e.message)) this.aiPausedUntil = Date.now() + 5 * 60000;
+      this.log('analyst', 'info', `AI unavailable (${e.message}) · using the rule score`, c);
+      ev.checks.pop();
+      return this.decideOnRules(ev);
+    }
+    this.counters.aiCalls++; this.counters.aiInTok += out.inTok; this.counters.aiOutTok += out.outTok;
+    ev.ai = out;
+    const pass = out.verdict === 'buy' && out.score >= cfg.minScore;
+    ev.checks.push({ key: 'ai', label: `AI Analyst says buy, score ≥ ${cfg.minScore.toFixed(2)}`, pass, value: `${out.verdict} · ${out.score.toFixed(2)}` });
+    if (!pass) return this.kill(ev, 'analyst', 'ai', `AI ${out.verdict} · ${out.score.toFixed(2)} · ${out.summary}`);
+    this.log('analyst', 'pass', `AI buy · ${out.score.toFixed(2)} · ${out.summary}`, c, { score: out.score });
     this.execute(ev).catch((e) => this.softError(e));
   }
 
@@ -581,7 +682,8 @@ class Desk extends EventEmitter {
       counters: this.counters, why: this.why, reasons: REASONS, agents: this.agents,
       positions: this.positions, trades: this.trades.slice(-200).reverse(),
       best: pnls.length ? Math.max(...pnls) : null, worst: pnls.length ? Math.min(...pnls) : null,
-      curve, config: this.config, feeds: feeds.health,
+      curve, config: this.config, aiKeySet: !!this.aiKey(), aiOn: this.aiOn(),
+      feeds: Object.fromEntries(Object.entries(feeds.health).filter(([k]) => k !== 'ai' || this.config.aiAnalyst)),
       queue: { safety: this.rugQueue.length, secondLook: this.secondLook.length },
     };
   }

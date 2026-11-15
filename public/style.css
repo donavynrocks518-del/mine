@@ -152,6 +152,8 @@ tbody tr:hover { background: var(--panel-2); }
 .tag.took { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, transparent); }
 .tag.fast { color: var(--teal); border-color: color-mix(in srgb, var(--teal) 40%, transparent); }
 .field.wide { grid-column: 1 / -1; }
+.check.big { font-size: 13px; color: var(--text); }
+.chk { overflow-wrap: anywhere; }
 .empty { color: var(--muted); padding: 26px 8px; text-align: center; font-size: 13px; }
 
 /* ---------- why they died ---------- */

@@ -62,6 +62,10 @@ const FIELDS = [
   ['feePct', 'Swap fee per side', '%', 0.05],
   ['slipPct', 'Extra slippage per side', '%', 0.1],
   ['maxPoolPct', 'Max share of a pool', '%', 0.1],
+  ['AI Analyst'],
+  ['aiAnalyst', 'Ask Claude for a verdict on every token that passes the filters', 'bool'],
+  ['aiKey', 'Anthropic API key (from console.anthropic.com, stays on this computer)', 'secret'],
+  ['aiModel', 'Model', 'model'],
   ['Speed'],
   ['rpcUrl', 'Private Solana node address (optional, blank = free public node)', 'text'],
 ];
@@ -90,6 +94,12 @@ $('openSettings').onclick = () => {
   if (!snap) return;
   $('fields').innerHTML = FIELDS.map((f) => (f.length === 1
     ? `<h3>${f[0]}</h3>`
+    : f[2] === 'bool'
+      ? `<div class="field wide"><label class="check big"><input id="f_${f[0]}" name="${f[0]}" type="checkbox" ${snap.config[f[0]] ? 'checked' : ''}> ${f[1]}</label></div>`
+    : f[2] === 'secret'
+      ? `<div class="field wide"><label for="f_${f[0]}">${f[1]}</label><div class="in"><input id="f_${f[0]}" name="${f[0]}" type="password" placeholder="${snap.aiKeySet ? 'A key is saved. Leave blank to keep it.' : 'sk-ant-…'}" autocomplete="off"></div></div>`
+    : f[2] === 'model'
+      ? `<div class="field wide"><label for="f_${f[0]}">${f[1]}</label><div class="in"><input id="f_${f[0]}" name="${f[0]}" type="text" value="${esc(snap.config[f[0]])}" autocomplete="off" spellcheck="false"></div></div>`
     : f[2] === 'text'
       ? `<div class="field wide"><label for="f_${f[0]}">${f[1]}</label><div class="in"><input id="f_${f[0]}" name="${f[0]}" type="url" placeholder="https://…" value="${esc(snap.config[f[0]])}" autocomplete="off"></div></div>`
       : `<div class="field"><label for="f_${f[0]}">${f[1]}</label><div class="in"><input id="f_${f[0]}" name="${f[0]}" type="number" step="any" min="0" value="${snap.config[f[0]]}" required>${f[2] ? `<span class="unit">${f[2]}</span>` : ''}</div></div>`)).join('');
@@ -98,7 +108,9 @@ $('openSettings').onclick = () => {
 $('settings').addEventListener('close', () => {
   if ($('settings').returnValue !== 'save') return;
   const body = {};
-  new FormData($('settingsForm')).forEach((v, k) => { body[k] = k === 'rpcUrl' ? v : Number(v); });
+  new FormData($('settingsForm')).forEach((v, k) => { body[k] = ['rpcUrl', 'aiKey', 'aiModel'].includes(k) ? v : Number(v); });
+  body.aiAnalyst = $('f_aiAnalyst').checked;
+  if (body.aiAnalyst && !body.aiKey && !snap.aiKeySet) alert('The AI Analyst needs an API key. It stays off until you add one in Settings.');
   post('/api/config', body);
 });
 
@@ -137,7 +149,7 @@ function render(s) {
   const pills = {
     scout: `${count(c.scanned)} pairs`,
     filter: `${count(c.killed)} · ${c.scanned ? Math.round((c.killed / c.scanned) * 100) : 0}%`,
-    analyst: `${count(c.scored)} scored`,
+    analyst: s.aiOn ? `${count(c.scored)} scored · ${count(c.aiCalls)} by AI` : `${count(c.scored)} scored`,
     executor: `size ≤ ${s.config.maxSizePct}%`,
     risk: `−${s.config.stopPct}% · trail +${s.config.trailArmPct}%`,
     logger: `${count(c.reasons)} reasons`,
@@ -146,8 +158,9 @@ function render(s) {
   $('agents').innerHTML = AGENTS.map(([key, name, sub, letter]) => {
     const a = s.agents[key];
     const last = a ? `${a.sym ? `<span class="sym">$${esc(a.sym)}</span> ` : ''}${esc(a.text)}` : (key === 'executor' ? 'nothing passed yet' : key === 'risk' ? 'no open risk' : 'waiting…');
+    const role = key === 'analyst' && s.aiOn ? 'rules, then Claude' : sub;
     return `<button type="button" class="agent a-${key} ${filter.agent === key ? 'on' : ''}" data-agent="${key}" title="Show ${name} in the log">
-      <span class="ico">${letter}</span><span><b>${name}</b><span class="sub">${sub}</span></span>
+      <span class="ico">${letter}</span><span><b>${name}</b><span class="sub">${role}</span></span>
       <span class="last">${last}</span><span class="pill">${pills[key]}</span></button>`;
   }).join('');
 
@@ -286,7 +299,11 @@ async function openToken(mint) {
   }
   const checks = ev && ev.checks.length ? `<h3>Checks</h3><div class="checks">${ev.checks.map((k) => `
     <div class="chk ${k.pass ? 'pass' : 'fail'}"><span class="m">${k.pass ? '✓' : '✕'}</span><span>${esc(k.label)}</span><span class="v">${esc(k.value)}</span></div>`).join('')}</div>` : '';
-  const parts = ev && ev.parts ? `<h3>Analyst score · ${ev.score.toFixed(2)}</h3>${ev.parts.map((p) => `
+  const flags = (list, mark, klass) => list.map((f) => `<div class="chk ${klass}"><span class="m">${mark}</span><span>${esc(f)}</span><span></span></div>`).join('');
+  const aiBlock = ev && ev.ai ? `<h3>AI Analyst · ${esc(ev.ai.verdict)} · ${ev.ai.score.toFixed(2)}</h3>
+    <div class="verdict ${ev.ai.verdict === 'buy' ? 'bought' : 'killed'}">${esc(ev.ai.summary)}<div class="muted">${esc(ev.ai.model)}</div></div>
+    <div class="checks" style="margin-top:8px">${flags(ev.ai.green, '+', 'pass')}${flags(ev.ai.red, '−', 'fail')}</div>` : '';
+  const parts = ev && ev.parts ? `<h3>${ev.ai ? 'Rule score' : 'Analyst score'} · ${ev.score.toFixed(2)}</h3>${ev.parts.map((p) => `
     <div class="part"><div class="top-line"><span>${esc(p.label)} <span class="muted">· weight ${Math.round(p.weight * 100)}%</span></span><b>${p.value.toFixed(2)}</b></div>
     <div class="bar"><i style="width:${p.value * 100}%"></i></div><div class="note">${esc(p.note)}</div></div>`).join('')}` : '';
   const market = ev ? `<h3>Market when checked</h3><div class="kv">
@@ -308,7 +325,7 @@ async function openToken(mint) {
       <a class="btn small" target="_blank" rel="noopener noreferrer" href="https://rugcheck.xyz/tokens/${encodeURIComponent(mint)}">RugCheck report ↗</a>
       <button type="button" class="btn small" id="showInLog">Show in log</button>
     </div>
-    ${verdict}${pos}${checks}${parts}${market}${hist}`;
+    ${verdict}${pos}${checks}${aiBlock}${parts}${market}${hist}`;
   $('showInLog').onclick = () => { $('search').value = c.sym; setFilter({ text: c.sym, reason: null, agent: 'all' }); };
   $('drawer').hidden = false;
 }

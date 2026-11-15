@@ -6,5 +6,6 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+if not exist node_modules call npm install --omit=dev
 node server.js --open
 pause
