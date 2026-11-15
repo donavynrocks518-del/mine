@@ -1,0 +1,610 @@
+<title>Chest Chart</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Inter:wght@400;500;600&display=swap">
+<style>
+/* Layout: one-screen app. Top bar, the island map filling the rest, a timer strip at the bottom,
+   and a bottom sheet for spots. Built for a phone or tablet beside the TV or monitor. */
+:root {
+  --sea: #0b1a26;          /* page ground: deep water at night */
+  --hull: #11263a;         /* bars and sheets */
+  --hull-2: #183451;       /* raised controls */
+  --rope: #2a4a6b;         /* lines */
+  --foam: #e8f1f8;         /* text */
+  --mist: #93a9bd;         /* secondary text */
+  --gold: #f2b632;         /* chests and primary actions */
+  --ember: #ff6a4d;        /* rare chests, empty results */
+  --tide: #3fd0c9;         /* timers */
+  --kelp: #58d68d;         /* found */
+  --violet: #b58cff;       /* vaults */
+  --display: "Chakra Petch", "Segoe UI", system-ui, sans-serif;
+  --body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: dark;
+}
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body {
+  background: var(--sea); color: var(--foam); font-family: var(--body); font-size: 14px;
+  display: flex; flex-direction: column; overflow: hidden; -webkit-tap-highlight-color: transparent;
+}
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--hull); }
+button { font: inherit; color: inherit; cursor: pointer; }
+input, textarea, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--tide); outline-offset: 2px; }
+
+/* ---------- top bar ---------- */
+.bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding-block: 10px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  background: var(--hull); border-bottom: 1px solid var(--rope); z-index: 5;
+}
+.brand { display: flex; align-items: baseline; gap: 8px; margin-right: auto; min-width: 0; }
+.brand h1 { font-family: var(--display); font-weight: 700; font-size: 20px; letter-spacing: .02em; margin: 0; text-transform: uppercase; }
+.brand h1 b { color: var(--gold); }
+.brand span { color: var(--mist); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+@media (max-width: 700px) {
+  .brand span { display: none; }
+  .chips { order: 3; width: 100%; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .chip { flex: none; }
+}
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 999px;
+  background: transparent; border: 1px solid var(--rope); color: var(--mist); font-size: 12px; font-weight: 600;
+}
+.chip i { width: 9px; height: 9px; border-radius: 50%; background: var(--c); }
+.chip[aria-pressed="true"] { background: var(--hull-2); color: var(--foam); border-color: color-mix(in srgb, var(--c) 60%, var(--rope)); }
+.btn {
+  padding: 8px 14px; border-radius: 10px; border: 1px solid var(--rope); background: var(--hull-2);
+  font-family: var(--display); font-weight: 600; font-size: 14px; letter-spacing: .02em; white-space: nowrap;
+}
+.btn.gold { background: var(--gold); color: #1b1300; border-color: transparent; }
+.btn.ghost { background: transparent; }
+.btn.small { padding: 5px 10px; font-size: 13px; border-radius: 8px; }
+.btn.danger { color: var(--ember); }
+.btn:disabled { opacity: .45; cursor: default; }
+
+.notice {
+  padding-block: 8px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  background: color-mix(in srgb, var(--gold) 16%, var(--hull)); color: var(--foam); font-size: 13px; border-bottom: 1px solid var(--rope);
+  display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap;
+}
+
+/* ---------- map ---------- */
+.stage { position: relative; flex: 1; min-height: 0; overflow: hidden; touch-action: none; background: #0f3f63; cursor: grab; }
+.stage.dragging { cursor: grabbing; }
+.world { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+.world img { display: block; width: 100%; height: 100%; max-width: none; user-select: none; -webkit-user-drag: none; pointer-events: none; }
+.pin {
+  position: absolute; width: 0; height: 0; border: 0; padding: 0; background: none;
+}
+.pin .dot {
+  position: absolute; left: 0; top: 0; transform: translate(-50%, -50%) scale(var(--inv, 1));
+  width: 30px; height: 30px; border-radius: 50% 50% 50% 6px; rotate: -45deg; display: grid; place-items: center;
+  background: var(--c); border: 2px solid #0b1a26; box-shadow: 0 2px 6px rgba(0, 0, 0, .45);
+}
+.pin .dot span { rotate: 45deg; font-family: var(--display); font-weight: 700; font-size: 12px; color: #0b1a26; }
+.pin .count {
+  position: absolute; left: 0; top: 0; transform: translate(-50%, calc(-100% - 20px)) scale(var(--inv, 1)); transform-origin: 50% 100%;
+  background: var(--tide); color: #062321; font-family: var(--display); font-weight: 700; font-size: 12px;
+  padding: 1px 6px; border-radius: 6px; white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+.pin .count.done { background: var(--ember); color: #250600; }
+.pin.sel .dot { outline: 3px solid var(--foam); outline-offset: 2px; }
+.pin.draft .dot { background: transparent; border: 2px dashed var(--foam); }
+.zoom { position: absolute; right: max(12px, env(safe-area-inset-right, 0px)); bottom: 12px; display: flex; flex-direction: column; gap: 6px; }
+.zoom button { width: 40px; height: 40px; border-radius: 10px; border: 1px solid var(--rope); background: color-mix(in srgb, var(--hull) 90%, transparent); font-size: 20px; font-weight: 600; }
+.hint {
+  position: absolute; left: 50%; top: 12px; transform: translateX(-50%); max-width: calc(100% - 32px);
+  background: color-mix(in srgb, var(--hull) 92%, transparent); border: 1px solid var(--rope); border-radius: 12px;
+  padding: 8px 12px; font-size: 13px; color: var(--foam); text-align: center; pointer-events: none;
+}
+
+/* ---------- timers ---------- */
+.timers {
+  display: flex; gap: 8px; overflow-x: auto; align-items: center; min-height: 52px;
+  padding-block: 8px calc(8px + env(safe-area-inset-bottom, 0px)); padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  background: var(--hull); border-top: 1px solid var(--rope);
+}
+.timers .empty { color: var(--mist); font-size: 13px; }
+.tchip {
+  display: inline-flex; align-items: center; gap: 8px; padding: 6px 6px 6px 12px; border-radius: 10px; flex: none;
+  background: var(--hull-2); border: 1px solid color-mix(in srgb, var(--tide) 45%, var(--rope));
+}
+.tchip.done { border-color: var(--ember); background: color-mix(in srgb, var(--ember) 18%, var(--hull-2)); }
+.tchip b { font-family: var(--display); font-size: 17px; color: var(--tide); font-variant-numeric: tabular-nums; }
+.tchip.done b { color: var(--ember); }
+.tchip span { font-size: 12px; color: var(--mist); max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tchip button { border: 0; background: transparent; color: var(--mist); width: 26px; height: 26px; border-radius: 6px; font-size: 16px; }
+
+/* ---------- sheets ---------- */
+.sheet {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; max-height: 78%; overflow-y: auto;
+  background: var(--hull); border-top: 1px solid var(--rope); border-radius: 18px 18px 0 0;
+  padding-block: 16px calc(18px + env(safe-area-inset-bottom, 0px)); padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  box-shadow: 0 -12px 40px rgba(0, 0, 0, .45);
+}
+@media (min-width: 760px) {
+  .sheet { left: auto; right: max(16px, env(safe-area-inset-right, 0px)); bottom: 72px; width: 400px; max-height: calc(100% - 150px); border-radius: 18px; border: 1px solid var(--rope); }
+}
+.sheet h2 { font-family: var(--display); font-size: 20px; margin: 0; text-wrap: balance; }
+.sheet h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--mist); margin: 18px 0 8px; font-weight: 600; }
+.sheet .head { display: flex; align-items: flex-start; gap: 10px; }
+.sheet .head > div { flex: 1; min-width: 0; }
+.sheet .x { border: 0; background: transparent; color: var(--mist); font-size: 24px; line-height: 1; padding: 2px 6px; }
+.sub { color: var(--mist); font-size: 13px; margin-top: 2px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.field { display: grid; gap: 4px; margin-top: 10px; }
+.field label { font-size: 12px; color: var(--mist); }
+.field input, .field textarea, .field select {
+  width: 100%; box-sizing: border-box; padding: 9px 11px; border-radius: 10px; border: 1px solid var(--rope); background: var(--sea);
+}
+.field textarea { min-height: 60px; resize: vertical; }
+.types { display: flex; gap: 6px; flex-wrap: wrap; }
+.types button { padding: 7px 11px; border-radius: 10px; border: 1px solid var(--rope); background: var(--sea); font-size: 13px; display: inline-flex; gap: 6px; align-items: center; }
+.types button i { width: 10px; height: 10px; border-radius: 50%; background: var(--c); }
+.types button[aria-pressed="true"] { border-color: var(--c); background: color-mix(in srgb, var(--c) 18%, var(--sea)); }
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.stat { background: var(--sea); border: 1px solid var(--rope); border-radius: 12px; padding: 10px; }
+.stat dt { font-size: 11px; color: var(--mist); text-transform: uppercase; letter-spacing: .06em; }
+.stat dd { margin: 4px 0 0; font-family: var(--display); font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.result { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.result button { padding: 12px; border-radius: 12px; font-family: var(--display); font-weight: 700; font-size: 16px; border: 1px solid var(--rope); }
+.result .found { background: color-mix(in srgb, var(--kelp) 22%, var(--hull-2)); color: var(--kelp); }
+.result .nope { background: color-mix(in srgb, var(--ember) 18%, var(--hull-2)); color: var(--ember); }
+.presets { display: flex; gap: 6px; flex-wrap: wrap; }
+.presets button { padding: 8px 12px; border-radius: 10px; border: 1px solid color-mix(in srgb, var(--tide) 45%, var(--rope)); background: var(--sea); color: var(--tide); font-family: var(--display); font-weight: 700; font-variant-numeric: tabular-nums; }
+.presets input { width: 72px; padding: 8px; border-radius: 10px; border: 1px solid var(--rope); background: var(--sea); }
+.confirm { margin-top: 10px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--ember); background: color-mix(in srgb, var(--ember) 12%, var(--hull)); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.confirm p { margin: 0; flex: 1; min-width: 160px; }
+
+.list { display: grid; gap: 6px; }
+.item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 12px; background: var(--sea); border: 1px solid var(--rope); text-align: left; width: 100%; }
+.item b { font-weight: 600; }
+.item .sub { margin: 0; }
+.item .grow { flex: 1; min-width: 0; }
+.tag { font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 6px; font-family: var(--display); }
+.tag.ok { background: color-mix(in srgb, var(--kelp) 22%, transparent); color: var(--kelp); }
+.tag.no { background: color-mix(in srgb, var(--ember) 20%, transparent); color: var(--ember); }
+.places { display: flex; gap: 6px; flex-wrap: wrap; }
+.places button { padding: 6px 10px; border-radius: 999px; border: 1px solid var(--rope); background: var(--sea); font-size: 12px; }
+.foot { color: var(--mist); font-size: 12px; margin-top: 18px; line-height: 1.5; }
+.toast {
+  position: fixed; left: 50%; bottom: calc(70px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); z-index: 30;
+  background: var(--foam); color: var(--sea); padding: 8px 14px; border-radius: 10px; font-weight: 600; font-size: 13px; max-width: calc(100% - 32px);
+}
+@media (prefers-reduced-motion: no-preference) { .world.ease { transition: transform .25s ease; } }
+</style>
+
+<header class="bar">
+  <div class="brand"><h1>Chest <b>Chart</b></h1><span id="storeNote">Loading your spots…</span></div>
+  <div class="chips" id="filters" aria-label="Show spot types"></div>
+  <button class="btn" id="openMatches" type="button">Matches</button>
+</header>
+<div class="notice" id="seasonNote" hidden>
+  <span>The map changed since you saved these spots. Check each one is still in the right place.</span>
+  <button class="btn small" id="ackSeason" type="button">Got it</button>
+</div>
+
+<div class="stage" id="stage" aria-label="Island map. Drag to move, pinch or scroll to zoom, tap to add a spot.">
+  <div class="world" id="world"><img id="mapImg" src="map.jpg" alt="Island map with location names" width="1200" height="1200"></div>
+  <div class="hint" id="hint">Tap the map to mark a chest spot</div>
+  <div class="zoom"><button type="button" id="zin" aria-label="Zoom in">+</button><button type="button" id="zout" aria-label="Zoom out">−</button><button type="button" id="zfit" aria-label="Show whole map">⤢</button></div>
+</div>
+
+<footer class="timers" id="timers" aria-label="Timers"></footer>
+
+<section class="sheet" id="sheet" hidden aria-live="polite"></section>
+<div class="toast" id="toast" hidden></div>
+
+<script>
+'use strict';
+/* Chest Chart: a second-screen map for chest spots, manual timers and a match log.
+   It never connects to or reads the game. Map art and location names come from a public
+   Fortnite data API, captured when this page was published. */
+
+const MAP = { sig: "492c35fb12", captured: "2026-11-15", pois: [
+  { name: "Lantern Landing", u: 0.3626, v: 0.4237 }, { name: "Baratie", u: 0.7939, v: 0.7797 },
+  { name: "Rubber Resort", u: 0.2944, v: 0.1474 }, { name: "Plunder Port", u: 0.5744, v: 0.8874 },
+  { name: "The Chest", u: 0.2477, v: 0.2785 }, { name: "Arlong Park", u: 0.1405, v: 0.4851 },
+  { name: "Windmill Village", u: 0.2413, v: 0.747 }, { name: "Nami's Tangerine Grove", u: 0.2039, v: 0.8497 },
+  { name: "Henry", u: 0.6189, v: 0.7993 }, { name: "The $.$. Rocky", u: 0.7977, v: 0.5631 },
+  { name: "Busy Bay", u: 0.7744, v: 0.7835 }, { name: "Cursed Cavern", u: 0.6029, v: 0.5054 },
+  { name: "Giant's Battlefield", u: 0.408, v: 0.5848 }, { name: "Buggy's Beachhead", u: 0.4741, v: 0.2582 },
+  { name: "The Salty Skull", u: 0.6213, v: 0.5693 }, { name: "Loguetown", u: 0.4383, v: 0.7008 },
+] };
+
+const TYPES = {
+  chest: { label: "Chest", letter: "C", color: "var(--gold)" },
+  rare: { label: "Rare chest", letter: "R", color: "var(--ember)" },
+  vault: { label: "Vault", letter: "V", color: "var(--violet)" },
+  other: { label: "Other", letter: "•", color: "var(--tide)" },
+};
+const PRESETS = [60, 120, 300];
+
+const $ = (id) => document.getElementById(id);
+const el = (tag, attrs = {}, ...kids) => {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") n.className = v;
+    else if (k === "style") n.style.cssText = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else if (v === true) n.setAttribute(k, "");
+    else if (v !== false && v != null) n.setAttribute(k, v);
+  }
+  for (const c of kids.flat()) if (c != null && c !== false) n.append(c.nodeType ? c : String(c));
+  return n;
+};
+const fmt = (s) => { s = Math.max(0, Math.ceil(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
+const when = (t) => new Date(t).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+const local = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* storage blocked */ } },
+};
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.hidden = false;
+  clearTimeout(toast.h); toast.h = setTimeout(() => { t.hidden = true; }, 2200);
+}
+
+/* ---------- state ---------- */
+let spots = [];                 // {id, u, v, type, name, note, visits, finds, created}
+let matches = [];               // {id, start, visits:[{spot, found, t}]}, newest first
+let mapSig = MAP.sig;           // the map these spots were saved against
+let timers = local.get("cc.timers", []);       // per device: {id, spot, label, end}
+let show = local.get("cc.show", { chest: true, rare: true, vault: true, other: true });
+let sel = null;                 // selected spot id
+let draft = null;               // {u, v} while adding
+let confirmDelete = false;
+let store = null;               // {spots, matches} db refs, or null when saving locally
+
+/* ---------- saving ---------- */
+// Spots and matches live in the artifact's store, so a phone and a computer see the same map.
+// Signed out or offline: they fall back to this device only, and the bar says so.
+const queue = { spots: Promise.resolve(), matches: Promise.resolve() };
+function save(which) {
+  const body = which === "spots" ? { sig: mapSig, list: spots } : { list: matches.slice(0, 150) };
+  local.set(`cc.${which}`, body);
+  if (!store) return;
+  queue[which] = queue[which].then(() => store[which].set(body)).catch((e) => {
+    $("storeNote").textContent = e && e.code === "quota_exceeded" ? "Storage full: delete old matches" : "Couldn't save online; kept on this device";
+  });
+}
+function applySpots(body) {
+  if (!body) return;
+  spots = Array.isArray(body.list) ? body.list : [];
+  if (body.sig) mapSig = body.sig;
+  $("seasonNote").hidden = !(spots.length && mapSig !== MAP.sig);
+}
+function applyMatches(body) { if (body) matches = Array.isArray(body.list) ? body.list : []; }
+
+async function connect() {
+  applySpots(local.get("cc.spots", null)); applyMatches(local.get("cc.matches", null)); render();
+  const db = await (window.claude?.use?.("db") ?? Promise.resolve(null)).catch(() => null);
+  if (!db) { $("storeNote").textContent = "Saved on this device"; return; }
+  store = { spots: db.doc("chart/spots"), matches: db.doc("chart/matches") };
+  const slow = setTimeout(() => { $("storeNote").textContent = "Can't reach your saved spots yet"; }, 10000);
+  let first = { spots: true, matches: true };
+  const listen = (which, apply) => store[which].onSnapshot((snap) => {
+    if (!snap.metadata.fromCache) { clearTimeout(slow); $("storeNote").textContent = "Synced across your devices"; }
+    if (snap.exists) apply(snap.data());
+    else if (first[which] && !snap.metadata.fromCache) {
+      // First visit with the store: carry over anything saved on this device before.
+      const mine = which === "spots" ? spots : matches;
+      if (mine.length) save(which);
+    }
+    first[which] = false;
+    render();
+  }, () => { clearTimeout(slow); store = null; $("storeNote").textContent = "Saved on this device"; });
+  listen("spots", applySpots); listen("matches", applyMatches);
+}
+
+/* ---------- map: pan and zoom ---------- */
+const stage = $("stage"), world = $("world");
+const view = { x: 0, y: 0, s: 1, min: 0.3, max: 6 };
+const SIZE = 1200;
+function fit(animate) {
+  const r = stage.getBoundingClientRect();
+  const s = Math.min(r.width, r.height) / SIZE;
+  view.min = s * 0.9; view.s = s;
+  view.x = (r.width - SIZE * s) / 2; view.y = (r.height - SIZE * s) / 2;
+  apply(animate);
+}
+function clampView() {
+  const r = stage.getBoundingClientRect();
+  view.s = Math.min(view.max, Math.max(view.min, view.s));
+  const w = SIZE * view.s, pad = 80;
+  view.x = Math.min(r.width - pad, Math.max(pad - w, view.x));
+  view.y = Math.min(r.height - pad, Math.max(pad - w, view.y));
+}
+function apply(animate) {
+  clampView();
+  world.classList.toggle("ease", !!animate);
+  world.style.width = world.style.height = `${SIZE}px`;
+  world.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.s})`;
+  world.style.setProperty("--inv", (1 / view.s).toFixed(4));
+}
+function zoomAt(factor, cx, cy, animate) {
+  const s2 = Math.min(view.max, Math.max(view.min, view.s * factor));
+  const k = s2 / view.s;
+  view.x = cx - (cx - view.x) * k; view.y = cy - (cy - view.y) * k; view.s = s2;
+  apply(animate);
+}
+function centerOn(u, v, scale) {
+  const r = stage.getBoundingClientRect();
+  view.s = Math.max(view.s, scale || 2);
+  view.x = r.width / 2 - u * SIZE * view.s; view.y = r.height / 2 - v * SIZE * view.s;
+  apply(true);
+}
+const pts = new Map(); let drag = null;
+stage.addEventListener("pointerdown", (e) => {
+  if (e.target.closest(".zoom")) return;
+  stage.setPointerCapture(e.pointerId);
+  pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pts.size === 1) drag = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y, moved: 0, target: e.target.closest(".pin") };
+  else if (pts.size === 2) {
+    const [a, b] = [...pts.values()];
+    drag = { pinch: Math.hypot(a.x - b.x, a.y - b.y), s: view.s, moved: 99 };
+  }
+});
+stage.addEventListener("pointermove", (e) => {
+  if (!pts.has(e.pointerId) || !drag) return;
+  pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  const r = stage.getBoundingClientRect();
+  if (pts.size === 2 && drag.pinch) {
+    const [a, b] = [...pts.values()];
+    const d = Math.hypot(a.x - b.x, a.y - b.y);
+    zoomAt((drag.s * d / drag.pinch) / view.s, (a.x + b.x) / 2 - r.left, (a.y + b.y) / 2 - r.top);
+  } else if (pts.size === 1 && !drag.pinch) {
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    drag.moved = Math.max(drag.moved, Math.hypot(dx, dy));
+    if (drag.moved > 6) { stage.classList.add("dragging"); view.x = drag.vx + dx; view.y = drag.vy + dy; apply(); }
+  }
+});
+function up(e) {
+  if (!pts.has(e.pointerId)) return;
+  pts.delete(e.pointerId);
+  stage.classList.remove("dragging");
+  if (pts.size === 0 && drag && drag.moved <= 6 && e.type === "pointerup") {
+    if (drag.target) openSpot(drag.target.dataset.id);
+    else {
+      const r = stage.getBoundingClientRect();
+      const u = (e.clientX - r.left - view.x) / (SIZE * view.s), v = (e.clientY - r.top - view.y) / (SIZE * view.s);
+      if (u >= 0 && u <= 1 && v >= 0 && v <= 1) startDraft(u, v);
+    }
+  }
+  if (pts.size === 0) drag = null;
+}
+stage.addEventListener("pointerup", up); stage.addEventListener("pointercancel", up);
+stage.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const r = stage.getBoundingClientRect();
+  zoomAt(Math.exp(-e.deltaY * 0.0015), e.clientX - r.left, e.clientY - r.top);
+}, { passive: false });
+const centerZoom = (f) => { const r = stage.getBoundingClientRect(); zoomAt(f, r.width / 2, r.height / 2, true); };
+$("zin").onclick = () => centerZoom(1.5); $("zout").onclick = () => centerZoom(1 / 1.5); $("zfit").onclick = () => fit(true);
+let fitted = false;
+new ResizeObserver(() => { if (!fitted) { fit(); fitted = true; } else apply(); }).observe(stage);
+
+/* ---------- rendering ---------- */
+function nearest(u, v) {
+  let best = null, d = Infinity;
+  for (const p of MAP.pois) { const dd = (p.u - u) ** 2 + (p.v - v) ** 2; if (dd < d) { d = dd; best = p; } }
+  return best ? best.name : "";
+}
+function timerFor(spotId) { return timers.filter((t) => t.spot === spotId).sort((a, b) => a.end - b.end)[0]; }
+
+function renderPins() {
+  world.querySelectorAll(".pin").forEach((n) => n.remove());
+  const now = Date.now();
+  for (const s of spots) {
+    if (!show[s.type]) continue;
+    const t = TYPES[s.type] || TYPES.other;
+    const tm = timerFor(s.id);
+    const left = tm ? (tm.end - now) / 1000 : null;
+    world.append(el("button", {
+      type: "button", class: `pin${sel === s.id ? " sel" : ""}`, "data-id": s.id,
+      style: `left:${s.u * SIZE}px;top:${s.v * SIZE}px;--c:${t.color}`,
+      "aria-label": `${t.label}${s.name ? `: ${s.name}` : ""}`,
+    }, el("span", { class: "dot" }, el("span", {}, t.letter)),
+    tm ? el("span", { class: `count${left <= 0 ? " done" : ""}` }, left <= 0 ? "Done" : fmt(left)) : null));
+  }
+  if (draft) world.append(el("span", { class: "pin draft", style: `left:${draft.u * SIZE}px;top:${draft.v * SIZE}px;--c:var(--gold)` }, el("span", { class: "dot" })));
+  $("hint").hidden = spots.length > 0 || !!draft;
+}
+
+function renderFilters() {
+  const f = $("filters"); f.textContent = "";
+  for (const [k, t] of Object.entries(TYPES)) {
+    const n = spots.filter((s) => s.type === k).length;
+    f.append(el("button", { type: "button", class: "chip", style: `--c:${t.color}`, "aria-pressed": String(!!show[k]),
+      onclick: () => { show[k] = !show[k]; local.set("cc.show", show); render(); } }, el("i"), `${t.label} ${n}`));
+  }
+}
+
+function renderTimers() {
+  const box = $("timers"); box.textContent = "";
+  const now = Date.now();
+  if (!timers.length) { box.append(el("span", { class: "empty" }, "No timers running. Open a spot to start one.")); return; }
+  for (const t of [...timers].sort((a, b) => a.end - b.end)) {
+    const left = (t.end - now) / 1000;
+    box.append(el("div", { class: `tchip${left <= 0 ? " done" : ""}` },
+      el("b", {}, left <= 0 ? "Done" : fmt(left)), el("span", {}, t.label),
+      el("button", { type: "button", "aria-label": `Stop timer for ${t.label}`, onclick: () => stopTimer(t.id) }, "×")));
+  }
+}
+
+function render() { renderPins(); renderFilters(); renderTimers(); renderSheet(); }
+
+/* ---------- timers ---------- */
+let audio = null;
+function beep() {
+  try {
+    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+    for (let i = 0; i < 3; i++) {
+      const o = audio.createOscillator(), g = audio.createGain();
+      o.frequency.value = 880; o.connect(g); g.connect(audio.destination);
+      const t0 = audio.currentTime + i * 0.28;
+      g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.25, t0 + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.22);
+      o.start(t0); o.stop(t0 + 0.24);
+    }
+  } catch { /* sound unavailable */ }
+  try { navigator.vibrate?.([200, 100, 200]); } catch { /* no vibration */ }
+}
+function startTimer(spot, secs) {
+  if (!(secs > 0)) return;
+  if (audio && audio.state === "suspended") audio.resume().catch(() => {});
+  timers = timers.filter((t) => t.spot !== spot.id);
+  timers.push({ id: uid(), spot: spot.id, label: spot.name || nearest(spot.u, spot.v) || TYPES[spot.type].label, end: Date.now() + secs * 1000, rang: false });
+  local.set("cc.timers", timers);
+  toast(`Timer started: ${fmt(secs)}`);
+  render();
+}
+function stopTimer(id) { timers = timers.filter((t) => t.id !== id); local.set("cc.timers", timers); render(); }
+setInterval(() => {
+  const now = Date.now(); let rang = false;
+  for (const t of timers) if (!t.rang && t.end <= now) { t.rang = true; rang = true; }
+  if (rang) { beep(); local.set("cc.timers", timers); }
+  // Finished timers clear themselves after two minutes.
+  const before = timers.length;
+  timers = timers.filter((t) => now - t.end < 120000);
+  if (timers.length !== before) local.set("cc.timers", timers);
+  if (timers.length || rang || before) { renderTimers(); renderPins(); }
+}, 1000);
+
+/* ---------- spots ---------- */
+function startDraft(u, v) { sel = null; draft = { u, v, type: "chest", name: "", note: "" }; confirmDelete = false; render(); }
+function openSpot(id) { sel = id; draft = null; confirmDelete = false; render(); }
+function closeSheet() { sel = null; draft = null; panel = null; confirmDelete = false; render(); }
+function currentMatch(create) {
+  const m = matches[0];
+  if (m && Date.now() - m.start < 40 * 60000) return m;
+  if (!create) return null;
+  const nm = { id: uid(), start: Date.now(), visits: [] };
+  matches.unshift(nm); return nm;
+}
+function record(spot, found) {
+  const m = currentMatch(true);
+  m.visits.push({ spot: spot.id, found, t: Date.now() });
+  spot.visits = (spot.visits || 0) + 1; if (found) spot.finds = (spot.finds || 0) + 1;
+  save("matches"); save("spots");
+  toast(found ? "Logged: found it" : "Logged: empty");
+  render();
+}
+
+let panel = null; // "matches" | null
+function renderSheet() {
+  const sh = $("sheet"); sh.textContent = "";
+  if (panel === "matches") return renderMatches(sh);
+  const s = draft || spots.find((x) => x.id === sel);
+  if (!s) { sh.hidden = true; return; }
+  sh.hidden = false;
+  const isDraft = !!draft;
+  const t = TYPES[s.type] || TYPES.other;
+  const place = nearest(s.u, s.v);
+  sh.append(el("div", { class: "head" },
+    el("div", {}, el("h2", {}, isDraft ? "New spot" : (s.name || t.label)), el("div", { class: "sub" }, place ? `Near ${place}` : "")),
+    el("button", { type: "button", class: "x", "aria-label": "Close", onclick: closeSheet }, "×")));
+
+  const types = el("div", { class: "types", role: "group", "aria-label": "Spot type" });
+  for (const [k, v] of Object.entries(TYPES)) {
+    types.append(el("button", { type: "button", style: `--c:${v.color}`, "aria-pressed": String(s.type === k),
+      onclick: () => { s.type = k; if (!isDraft) save("spots"); render(); } }, el("i"), v.label));
+  }
+  sh.append(el("h3", {}, "Type"), types);
+
+  const name = el("input", { id: "spotName", value: s.name || "", placeholder: place ? `e.g. ${place} rooftop` : "e.g. Rooftop by the dock", maxlength: "60" });
+  const note = el("textarea", { id: "spotNote", placeholder: "How to get there, what it usually has…", maxlength: "300" });
+  note.value = s.note || "";
+  const commit = () => { s.name = name.value.trim(); s.note = note.value.trim(); if (!isDraft) { save("spots"); renderPins(); } };
+  name.addEventListener("change", commit); note.addEventListener("change", commit);
+  sh.append(el("div", { class: "field" }, el("label", { for: "spotName" }, "Name"), name),
+    el("div", { class: "field" }, el("label", { for: "spotNote" }, "Notes"), note));
+
+  if (isDraft) {
+    sh.append(el("div", { class: "row", style: "margin-top:14px" },
+      el("button", { type: "button", class: "btn gold", onclick: () => {
+        commit();
+        const spot = { id: uid(), u: +s.u.toFixed(4), v: +s.v.toFixed(4), type: s.type, name: s.name, note: s.note, visits: 0, finds: 0, created: Date.now() };
+        spots.push(spot); if (spots.length === 1) mapSig = MAP.sig;
+        draft = null; sel = spot.id; show[spot.type] = true; save("spots"); toast("Spot saved"); render();
+      } }, "Save spot"),
+      el("button", { type: "button", class: "btn ghost", onclick: closeSheet }, "Cancel")));
+    return;
+  }
+
+  const visits = s.visits || 0, finds = s.finds || 0;
+  sh.append(el("h3", {}, "Your results here"),
+    el("dl", { class: "stats" },
+      el("div", { class: "stat" }, el("dt", {}, "Visits"), el("dd", {}, visits)),
+      el("div", { class: "stat" }, el("dt", {}, "Found"), el("dd", {}, finds)),
+      el("div", { class: "stat" }, el("dt", {}, "Hit rate"), el("dd", {}, visits ? `${Math.round((finds / visits) * 100)}%` : "–"))),
+    el("div", { class: "result", style: "margin-top:8px" },
+      el("button", { type: "button", class: "found", onclick: () => record(s, true) }, "Found it"),
+      el("button", { type: "button", class: "nope", onclick: () => record(s, false) }, "Empty")));
+
+  const tm = timerFor(s.id);
+  const custom = el("input", { id: "customMin", type: "number", min: "0.5", step: "0.5", placeholder: "min", "aria-label": "Custom minutes" });
+  sh.append(el("h3", {}, tm ? `Timer · ${tm.end > Date.now() ? fmt((tm.end - Date.now()) / 1000) + " left" : "done"}` : "Timer"),
+    el("div", { class: "presets" },
+      ...PRESETS.map((sec) => el("button", { type: "button", onclick: () => startTimer(s, sec) }, fmt(sec))),
+      custom,
+      el("button", { type: "button", onclick: () => startTimer(s, Number(custom.value) * 60) }, "Start"),
+      tm ? el("button", { type: "button", class: "btn small danger", onclick: () => stopTimer(tm.id) }, "Stop") : null));
+
+  if (confirmDelete) {
+    sh.append(el("div", { class: "confirm" }, el("p", {}, `Delete this spot and its ${visits} logged visit${visits === 1 ? "" : "s"}? This can't be undone.`),
+      el("button", { type: "button", class: "btn small danger", onclick: () => {
+        spots = spots.filter((x) => x.id !== s.id); timers = timers.filter((x) => x.spot !== s.id); local.set("cc.timers", timers);
+        save("spots"); closeSheet(); toast("Spot deleted");
+      } }, "Delete"),
+      el("button", { type: "button", class: "btn small ghost", onclick: () => { confirmDelete = false; render(); } }, "Keep")));
+  } else {
+    sh.append(el("div", { class: "row", style: "margin-top:16px" },
+      el("button", { type: "button", class: "btn small ghost", onclick: () => centerOn(s.u, s.v, 2.5) }, "Zoom here"),
+      el("button", { type: "button", class: "btn small ghost danger", onclick: () => { confirmDelete = true; render(); } }, "Delete spot")));
+  }
+}
+
+function renderMatches(sh) {
+  sh.hidden = false;
+  const cur = currentMatch(false);
+  sh.append(el("div", { class: "head" },
+    el("div", {}, el("h2", {}, "Matches"), el("div", { class: "sub" }, cur ? `Current match started ${when(cur.start)}` : "No match in progress")),
+    el("button", { type: "button", class: "x", "aria-label": "Close", onclick: closeSheet }, "×")));
+  sh.append(el("div", { class: "row", style: "margin-top:12px" },
+    el("button", { type: "button", class: "btn gold", onclick: () => {
+      matches.unshift({ id: uid(), start: Date.now(), visits: [] }); save("matches"); toast("New match started"); render();
+    } }, "Start new match")));
+
+  // Best spots: by hit rate, then by visits.
+  const ranked = spots.filter((s) => s.visits).sort((a, b) => (b.finds / b.visits) - (a.finds / a.visits) || b.visits - a.visits).slice(0, 5);
+  sh.append(el("h3", {}, "Your best spots"));
+  sh.append(ranked.length ? el("div", { class: "list" }, ranked.map((s) => el("button", { type: "button", class: "item", onclick: () => { panel = null; openSpot(s.id); centerOn(s.u, s.v, 2.5); } },
+    el("div", { class: "grow" }, el("b", {}, s.name || TYPES[s.type].label), el("p", { class: "sub" }, `Near ${nearest(s.u, s.v)} · ${s.finds} of ${s.visits} visits`)),
+    el("span", { class: "tag ok" }, `${Math.round((s.finds / s.visits) * 100)}%`))))
+    : el("p", { class: "sub" }, "Log a few visits with Found it or Empty and your best spots show up here."));
+
+  sh.append(el("h3", {}, "History"));
+  const recent = matches.filter((m) => m.visits.length || m === cur).slice(0, 25);
+  sh.append(recent.length ? el("div", { class: "list" }, recent.map((m) => {
+    const f = m.visits.filter((v) => v.found).length;
+    return el("div", { class: "item" },
+      el("div", { class: "grow" }, el("b", {}, when(m.start)), el("p", { class: "sub" },
+        m.visits.length ? m.visits.map((v) => { const s = spots.find((x) => x.id === v.spot); return `${s ? (s.name || nearest(s.u, s.v)) : "Deleted spot"} ${v.found ? "✓" : "✕"}`; }).join(" · ") : "Nothing logged yet")),
+      el("span", { class: `tag ${f ? "ok" : "no"}` }, `${f}/${m.visits.length}`));
+  })) : el("p", { class: "sub" }, "No matches logged yet."));
+
+  sh.append(el("h3", {}, "Jump to a location"),
+    el("div", { class: "places" }, [...MAP.pois].sort((a, b) => a.name.localeCompare(b.name)).map((p) =>
+      el("button", { type: "button", onclick: () => { panel = null; closeSheet(); centerOn(p.u, p.v, 2.2); } }, p.name))));
+  sh.append(el("p", { class: "foot" }, `Map and location names from a public Fortnite data API, captured ${MAP.captured}. Unofficial fan tool, not affiliated with Epic Games. It never connects to or reads the game; it only knows what you mark.`));
+}
+$("openMatches").onclick = () => { sel = null; draft = null; panel = panel === "matches" ? null : "matches"; render(); };
+$("ackSeason").onclick = () => { mapSig = MAP.sig; $("seasonNote").hidden = true; save("spots"); };
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSheet(); });
+
+render();
+connect();
+</script>
